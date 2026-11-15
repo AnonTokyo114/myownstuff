@@ -1,0 +1,32 @@
+{
+    "folders": [
+        {
+            "name": "Personal Research GUI",
+            "path": "."
+        }
+    ],
+    "settings": {
+        // 其余设置由 .vscode/settings.json 提供；这里只强调与路径无关的部分，
+        // 保证这个文件在别的电脑上同样可用。
+        "python.terminal.executeInFileDir": false,
+        "files.encoding": "utf8",
+        "files.eol": "\n"
+    },
+    "launch": {
+        "version": "0.2.0",
+        "configurations": [
+            {
+                "name": "Run: Personal Research GUI",
+                "type": "debugpy",
+                "request": "launch",
+                "program": "${workspaceFolder}/main.py",
+                "cwd": "${workspaceFolder}",
+                "console": "integratedTerminal",
+                "env": {
+                    "QT_API": "pyside6"
+                },
+                "justMyCode": false
+            }
+        ]
+    }
+}

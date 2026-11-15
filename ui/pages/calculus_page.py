@@ -1,0 +1,443 @@
+"""微积分页：定/不定积分、导数、偏导。
+
+界面只负责收集参数与呈现结果；所有数学都在 core 里（已与 myapp 逐位对齐）。
+三个标签页共用同一个「结果面板」，保证 LaTeX、源码、数值三处表现一致。
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core import calculus_numeric as cn
+from core import calculus_symbolic as cs
+from core import latex_render as lr
+
+#: 变量假设：(中文, core 里用的键)
+ASSUMPTIONS = [
+    ("Real (default)", None),
+    ("Integer", "integer"),
+    ("Positive", "positive"),
+    ("Non-negative", "nonnegative"),
+    ("Complex", "complex"),
+]
+
+
+class ResultPanel(QWidget):
+    """Result view: LaTeX image + source + numeric text."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # ---- LaTeX 图 ----
+        self._image_holder = QFrame()
+        self._image_holder.setObjectName("latexBox")
+        self._image_holder.setMinimumHeight(120)
+        holder_layout = QVBoxLayout(self._image_holder)
+        holder_layout.setContentsMargins(12, 10, 12, 10)
+        self._image = QLabel("(the result will appear here)")
+        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setWordWrap(True)
+        holder_layout.addWidget(self._image)
+        layout.addWidget(self._image_holder)
+
+        # ---- LaTeX 源码 ----
+        src_row = QHBoxLayout()
+        src_row.setSpacing(6)
+        src_row.addWidget(QLabel("LaTeX："))
+        self._source = QLineEdit()
+        self._source.setReadOnly(True)
+        self._source.setObjectName("codeField")
+        src_row.addWidget(self._source, 1)
+        self._copy_btn = QPushButton("Copy")
+        self._copy_btn.setObjectName("ghost")
+        self._copy_btn.setFixedWidth(64)
+        self._copy_btn.clicked.connect(self._copy_source)
+        src_row.addWidget(self._copy_btn)
+        layout.addLayout(src_row)
+
+        # ---- 数值/说明 ----
+        self._numeric = QPlainTextEdit()
+        self._numeric.setReadOnly(True)
+        self._numeric.setObjectName("numericBox")
+        self._numeric.setFixedHeight(92)
+        layout.addWidget(self._numeric)
+
+    # ------------------------------------------------------------------
+    def show_result(self, *, latex: str = "", text: str = "",
+                    numeric: str = "", error: str = "") -> None:
+        if error:
+            self._image.setPixmap(QPixmap())
+            self._image.setText(f"⚠ {error}")
+            self._image.setStyleSheet("color:#b3261e;")
+            self._source.setText("")
+            self._numeric.setPlainText("")
+            return
+
+        self._image.setStyleSheet("")
+        self._source.setText(latex or "")
+        self._numeric.setPlainText(numeric or text or "")
+
+        if latex:
+            png = lr.render_latex(latex)
+            if png:
+                pix = QPixmap()
+                if pix.loadFromData(png):
+                    # 宽图按可用宽度缩放，避免撑破窗口
+                    max_w = max(200, self._image_holder.width() - 40)
+                    if pix.width() > max_w:
+                        pix = pix.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
+                    self._image.setPixmap(pix)
+                    return
+        self._image.setText(text or "(no LaTeX result)")
+
+    def _copy_source(self) -> None:
+        text = self._source.text()
+        if text:
+            QGuiApplication.clipboard().setText(text)
+
+
+class _BaseTab(QWidget):
+    """Shared skeleton for the three tabs: form + buttons + result panel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(10)
+
+        form_box = QFrame()
+        form_box.setObjectName("formBox")
+        self.form = QFormLayout(form_box)
+        self.form.setContentsMargins(14, 12, 14, 12)
+        self.form.setSpacing(8)
+        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight
+                                    | Qt.AlignmentFlag.AlignVCenter)
+        outer.addWidget(form_box)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.run_btn = QPushButton("Compute")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.setFixedWidth(96)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setObjectName("ghost")
+        self.clear_btn.setFixedWidth(72)
+        btn_row.addWidget(self.run_btn)
+        btn_row.addWidget(self.clear_btn)
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
+
+        self.result = ResultPanel()
+        outer.addWidget(self.result, 1)
+
+        self.run_btn.clicked.connect(self.compute)
+        self.clear_btn.clicked.connect(self.clear)
+
+    # 子类实现
+    def compute(self) -> None:            # pragma: no cover - 由子类覆盖
+        raise NotImplementedError
+
+    def clear(self) -> None:              # pragma: no cover
+        self.result.show_result()
+
+
+def _expr_field(placeholder: str) -> QLineEdit:
+    field = QLineEdit()
+    field.setPlaceholderText(placeholder)
+    field.setObjectName("exprField")
+    return field
+
+
+def _var_field(placeholder: str = "x") -> QLineEdit:
+    field = QLineEdit(placeholder)
+    field.setFixedWidth(90)
+    return field
+
+
+def _assumption_combo() -> QComboBox:
+    combo = QComboBox()
+    for label, _key in ASSUMPTIONS:
+        combo.addItem(label)
+    combo.setFixedWidth(140)
+    return combo
+
+
+def _assumption_key(combo: QComboBox):
+    return ASSUMPTIONS[combo.currentIndex()][1]
+
+
+# ====================================================================== 积分
+class IntegralTab(_BaseTab):
+    def __init__(self) -> None:
+        super().__init__()
+        self.expr = _expr_field("e.g.  x^2   or  e^(i*x)   or  sin(x)/x")
+        self.var = _var_field("x")
+        self.assume = _assumption_combo()
+        self.lower = QLineEdit()
+        self.lower.setPlaceholderText("leave empty for indefinite")
+        self.upper = QLineEdit()
+        self.upper.setPlaceholderText("leave empty for indefinite")
+
+        self.form.addRow("Integrand", self.expr)
+        var_row = QHBoxLayout()
+        var_row.setSpacing(8)
+        var_row.addWidget(self.var)
+        var_row.addWidget(QLabel("Assumption"))
+        var_row.addWidget(self.assume)
+        var_row.addStretch(1)
+        self.form.addRow("Variable", _wrap(var_row))
+        bounds = QHBoxLayout()
+        bounds.setSpacing(8)
+        bounds.addWidget(self.lower)
+        bounds.addWidget(QLabel("→"))
+        bounds.addWidget(self.upper)
+        self.form.addRow("Bounds", _wrap(bounds))
+
+    def compute(self) -> None:
+        expr = self.expr.text().strip()
+        if not expr:
+            self.result.show_result(error="Please enter an integrand first")
+            return
+        var = self.var.text().strip() or "x"
+        lo_text = self.lower.text().strip()
+        hi_text = self.upper.text().strip()
+
+        try:
+            if not lo_text and not hi_text:
+                # ---- 不定积分 ----
+                txt, latex, notes = cs.integrate_symbolic(
+                    expr, var, assumptions=_assumption_key(self.assume))
+                self.result.show_result(latex=latex, text=txt,
+                                        numeric="\n".join(notes) if notes else "indefinite integral")
+                return
+
+            if not lo_text or not hi_text:
+                self.result.show_result(error="A definite integral needs both bounds")
+                return
+
+            lo = cn.parse_bound(lo_text)
+            hi = cn.parse_bound(hi_text)
+            value, err, warns = cn.integrate(expr, lo, hi, x_name=var)
+            txt, latex, notes = cs.integrate_symbolic(
+                expr, var, lower=lo, upper=hi,
+                assumptions=_assumption_key(self.assume))
+
+            lines = [f"Numeric result: {value}"]
+            lines.append(f"Error estimate: ±{err:.3e}")
+            if txt:
+                lines.append(f"Symbolic result: {txt}")
+            for w in (warns or []) + (notes or []):
+                lines.append(f"Note: {w}")
+            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
+        except Exception as exc:
+            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+
+
+# ====================================================================== 导数
+class DerivativeTab(_BaseTab):
+    def __init__(self) -> None:
+        super().__init__()
+        self.expr = _expr_field("e.g.  sin(x)*x   or  exp(-x^2)")
+        self.var = _var_field("x")
+        self.assume = _assumption_combo()
+        self.point = QLineEdit("1")
+        self.point.setPlaceholderText("value of x to evaluate at")
+        self.order = QSpinBox()
+        self.order.setRange(1, 2)
+        self.order.setValue(1)
+        self.order.setFixedWidth(70)
+
+        self.form.addRow("Function", self.expr)
+        var_row = QHBoxLayout()
+        var_row.setSpacing(8)
+        var_row.addWidget(self.var)
+        var_row.addWidget(QLabel("Assumption"))
+        var_row.addWidget(self.assume)
+        var_row.addStretch(1)
+        self.form.addRow("Variable", _wrap(var_row))
+        pt_row = QHBoxLayout()
+        pt_row.setSpacing(8)
+        pt_row.addWidget(self.point)
+        pt_row.addWidget(QLabel("Order"))
+        pt_row.addWidget(self.order)
+        pt_row.addStretch(1)
+        self.form.addRow("Evaluate at", _wrap(pt_row))
+
+    def compute(self) -> None:
+        expr = self.expr.text().strip()
+        if not expr:
+            self.result.show_result(error="Please enter a function first")
+            return
+        var = self.var.text().strip() or "x"
+        try:
+            x0 = float(self.point.text().strip())
+        except ValueError:
+            self.result.show_result(error="The evaluation point must be a number")
+            return
+
+        try:
+            txt, latex = cs.differentiate(expr, var,
+                                          assumptions=_assumption_key(self.assume))
+            order = self.order.value()
+            if order == 2:
+                txt2, latex2 = cs.differentiate(txt, var,
+                                                assumptions=_assumption_key(self.assume))
+                txt, latex = txt2, latex2
+            value, err = cn.derivative(expr, x0, order=order, x_name=var)
+
+            lines = [f"{'second' if order == 2 else 'first'} derivative at {var} = {x0}: {value}",
+                     f"Error estimate: ±{err:.3e}",
+                     f"Derivative: {txt}"]
+            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
+        except Exception as exc:
+            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+
+
+# ====================================================================== 偏导
+class PartialTab(_BaseTab):
+    def __init__(self) -> None:
+        super().__init__()
+        self.expr = _expr_field("e.g.  x^2*y + sin(z)")
+        self.vars = QLineEdit("x, y")
+        self.vars.setPlaceholderText("comma-separated variable names")
+        self.assume = _assumption_combo()
+        self.point = QLineEdit("x=1, y=2")
+        self.point.setPlaceholderText("x=1, y=2")
+        self.which = QLineEdit("x")
+        self.which.setFixedWidth(70)
+        self.order = QSpinBox()
+        self.order.setRange(1, 2)
+        self.order.setValue(1)
+        self.order.setFixedWidth(70)
+
+        self.form.addRow("Function", self.expr)
+        v_row = QHBoxLayout()
+        v_row.setSpacing(8)
+        v_row.addWidget(self.vars)
+        v_row.addWidget(QLabel("Assumption"))
+        v_row.addWidget(self.assume)
+        v_row.addStretch(1)
+        self.form.addRow("Variables", _wrap(v_row))
+        p_row = QHBoxLayout()
+        p_row.setSpacing(8)
+        p_row.addWidget(self.point)
+        p_row.addWidget(QLabel("w.r.t."))
+        p_row.addWidget(self.which)
+        p_row.addWidget(QLabel(", order"))
+        p_row.addWidget(self.order)
+        p_row.addStretch(1)
+        self.form.addRow("Evaluate at", _wrap(p_row))
+
+    def compute(self) -> None:
+        expr = self.expr.text().strip()
+        if not expr:
+            self.result.show_result(error="Please enter a function first")
+            return
+        variables = [v.strip() for v in self.vars.text().split(",") if v.strip()]
+        if not variables:
+            self.result.show_result(error="At least one variable is required")
+            return
+        var = self.which.text().strip() or variables[0]
+        if var not in variables:
+            self.result.show_result(error=f"Differentiation variable {var} is not in the variable list")
+            return
+
+        point: dict[str, float] = {}
+        for piece in self.point.text().split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if "=" not in piece:
+                self.result.show_result(error=f"Evaluation point \"{piece}\" should be written as name=value")
+                return
+            name, _, value = piece.partition("=")
+            try:
+                point[name.strip()] = float(value.strip())
+            except ValueError:
+                self.result.show_result(error=f"\"{value.strip()}\" is not a number")
+                return
+
+        try:
+            assume = _assumption_key(self.assume)
+            txt, latex = cs.partial(expr, variables, var,
+                                    order=self.order.value(), assumptions=assume)
+            value, err = cn.partial_derivative(expr, variables, point, var,
+                                               order=self.order.value())
+            lines = [f"∂/∂{var} at {point}: {value}",
+                     f"Error estimate: ±{err:.3e}",
+                     f"Partial derivative: {txt}"]
+            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
+        except Exception as exc:
+            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+
+
+# ====================================================================== 页面
+def _wrap(layout: QHBoxLayout) -> QWidget:
+    """Wrap a QHBoxLayout in a widget so QFormLayout.addRow can take it."""
+    holder = QWidget()
+    holder.setLayout(layout)
+    layout.setContentsMargins(0, 0, 0, 0)
+    return holder
+
+
+class CalculusPage(QWidget):
+    page_title = "Calculus"
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(12)
+
+        title = QLabel("Calculus")
+        title.setObjectName("pageTitle")
+        outer.addWidget(title)
+
+        subtitle = QLabel("Numeric and symbolic solutions together, with LaTeX and numeric output")
+        subtitle.setObjectName("pageSubtitle")
+        outer.addWidget(subtitle)
+
+        tabs = QTabWidget()
+        tabs.setObjectName("mainTabs")
+        self.integral_tab = IntegralTab()
+        self.derivative_tab = DerivativeTab()
+        self.partial_tab = PartialTab()
+        tabs.addTab(self.integral_tab, "∫  Integral")
+        tabs.addTab(self.derivative_tab, "d/dx  Derivative")
+        tabs.addTab(self.partial_tab, "∂  Partial")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        holder = QWidget()
+        holder_layout = QVBoxLayout(holder)
+        holder_layout.setContentsMargins(0, 0, 0, 0)
+        holder_layout.addWidget(tabs)
+        scroll.setWidget(holder)
+
+        outer.addWidget(scroll, 1)
+        self._tabs = tabs
+
+
+def _noop() -> None:
+    return None

@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run GUI",
+            "type": "shell",
+            "command": "python",
+            "args": ["main.py"],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "QT_API": "pyside6"
+                }
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Check imports",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-c",
+                "import core.transport, core.devices, core.stage, core.nidaq, core.optics, core.eigencalc, core.csvdata; import ui.main_window; print('all modules import OK')"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

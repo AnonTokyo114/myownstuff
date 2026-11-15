@@ -1,0 +1,18 @@
+# 虚拟环境（每台机器用 setup.bat 自己重建，不要拷）
+.venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyc
+
+# 离线依赖包（体积大；需要时用 download_wheels.bat 重新生成）
+wheels/
+
+# 运行产物
+*.log
+*.tmp
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db

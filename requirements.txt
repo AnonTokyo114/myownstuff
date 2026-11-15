@@ -1,0 +1,17 @@
+# ---- 界面与计算（必需）----
+# 只装 Essentials：QtWidgets / QtGui / QtCore 就够用了。
+# 不要写 PySide6（元包）—— 它会额外拉 Addons + WebEngine + Pdf，
+# 多出约 180 MB，而且本程序一个都用不到。
+PySide6-Essentials>=6.5
+
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+sympy>=1.12
+pandas>=2.0
+
+# ---- 硬件接口（按需，装了不会有副作用）----
+pyserial>=3.5
+pyvisa>=1.14
+pyvisa-py>=0.7
+nidaqmx>=0.9
