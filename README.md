@@ -58,6 +58,83 @@
 - **Ctrl+Shift+B** 跑 `Run GUI` 或 `Check imports`
 - 首次打开可能提示安装 Python 扩展，装 `ms-python.python` 即可
 
+## 版本管理（git）
+
+项目已经是一个 git 仓库。`.gitignore` 排除了 `.venv/`、`wheels/`、`__pycache__/`，
+所以仓库只有约 **150 KB**，克隆很快。
+
+### 在实验室电脑上 clone
+
+仓库的「远程」是本机的一个 bare 仓库：
+
+```
+C:\Users\Deliv\git-repos\research-gui.git
+```
+
+1. 把这个 `research-gui.git` 文件夹拷到移动硬盘 / U 盘
+2. 实验室电脑上（假设盘符是 `E:`）：
+
+```bat
+git clone E:\research-gui.git
+cd research-gui
+setup.bat
+run.bat
+```
+
+`setup.bat` 会在克隆出来的目录里重新建 `.venv`，所以**不需要**从这台机器拷依赖。
+
+### 日常改代码
+
+在本机改完，提交并同步到 bare 仓库：
+
+```bat
+git add -A
+git commit -m "说说改了什么"
+git push
+```
+
+实验室那边：
+
+```bat
+git pull
+```
+
+### 想换成 GitHub（可选，长期更省心）
+
+1. 在 GitHub 建一个**空**仓库（不要勾 "Add a README"）
+2. 在本机项目目录执行：
+
+```bat
+git remote set-url origin https://github.com/<你的用户名>/research-gui.git
+git push -u origin main
+```
+
+3. 之后实验室电脑直接：
+
+```bat
+git clone https://github.com/<你的用户名>/research-gui.git
+```
+
+好处是任何地方都能克隆、有云端备份；代价是仓库需要是 **private**（除非你不在乎公开）。
+
+### 注意
+
+- git 身份目前是占位的：
+
+  ```
+  user.name  = Deliv
+  user.email = deliv@users.noreply.github.com
+  ```
+
+  想改成自己的真实邮箱：
+
+  ```bat
+  git config --global user.email "you@example.com"
+  git config --global user.name "Your Name"
+  ```
+
+- `.git` 目录也在 OneDrive 里会同步，但它只有 150 KB 左右，无所谓。
+
 ## 依赖
 
 `setup.bat` 会自动装。手动装：`pip install -r requirements.txt`
