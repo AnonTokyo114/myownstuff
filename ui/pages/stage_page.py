@@ -52,7 +52,8 @@ class StagePage(QWidget):
         title.setObjectName("pageTitle")
         outer.addWidget(title)
         subtitle = QLabel("Two-axis stage. Pick the model, pick how it is "
-                          "connected, then Connect. Positions are in 0.1 µm.")
+                          "connected, then Connect. The position unit comes "
+                          "from the device itself.")
         subtitle.setObjectName("pageSubtitle")
         outer.addWidget(subtitle)
 
@@ -82,9 +83,10 @@ class StagePage(QWidget):
         pos_grid.setContentsMargins(12, 10, 12, 10)
         pos_grid.setSpacing(6)
 
-        pos_head = QLabel("Position (0.1 µm)")
-        pos_head.setObjectName("fieldLabel")
-        pos_grid.addWidget(pos_head, 0, 0, 1, 3)
+        # 单位由设备决定（连接后填），未连接时只写 "Position"
+        self.pos_head = QLabel("Position")
+        self.pos_head.setObjectName("fieldLabel")
+        pos_grid.addWidget(self.pos_head, 0, 0, 1, 3)
 
         pos_grid.addWidget(QLabel("X:"), 1, 0)
         self.x_value = QLabel("—")
@@ -263,13 +265,24 @@ class StagePage(QWidget):
         self.log_view.appendPlainText(f"[{stamp}] {text}")
 
     def _on_connected(self, _device) -> None:
+        self._update_units()
         self._update_controls()
         self.refresh_position()
 
     def _on_disconnected(self) -> None:
         self.x_value.setText("—")
         self.y_value.setText("—")
+        self._update_units()
         self._update_controls()
+
+    def _update_units(self) -> None:
+        """位置单位取自设备本身 —— 不同位移台的单位可能不同。
+
+        未连接时不写单位，避免给出误导性的默认值。
+        """
+        dev = self.device
+        unit = getattr(dev, "UNIT_LABEL", None) if dev is not None else None
+        self.pos_head.setText(f"Position ({unit})" if unit else "Position")
 
     def _on_verbose_changed(self, index: int) -> None:
         dev = self.device

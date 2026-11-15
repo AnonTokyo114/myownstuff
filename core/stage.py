@@ -64,6 +64,12 @@ class ASI_lx_4000:
     #: 界面用：这个设备支持哪些连接方式
     TRANSPORTS = ("serial",)
 
+    #: 位置单位。这是 **这个控制器** 的属性，不是通用常量：
+    #: ASI LX-4000 的一个计数就是 0.1 µm，换别的位移台未必如此。
+    UNIT_LABEL = "0.1 µm"
+    #: 一个计数等于多少微米；None 表示没有明确的物理换算
+    UNIT_IN_UM = 0.1
+
     def __init__(self, transport: Transport, *,
                  settle_time: float = 1.5,
                  connect_attempts: int = 3,

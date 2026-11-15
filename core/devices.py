@@ -34,6 +34,10 @@ class PlaceholderDevice:
 
     TRANSPORTS = ("serial", "lan", "gpib")
 
+    #: 占位设备没有真实物理单位，用 counts 表示「计数」
+    UNIT_LABEL = "counts"
+    UNIT_IN_UM = None
+
     def __init__(self, transport: Transport, *,
                  log_callback: Callable[[str], None] | None = None,
                  **options):
