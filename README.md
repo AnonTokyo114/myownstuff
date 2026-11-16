@@ -390,6 +390,28 @@ nidaqmx is not installed (pip install nidaqmx)
 NI-DAQmx driver not found. Install it from National Instruments ...
 ```
 
+### 单文件版（拷到别的机器最省事）
+
+`stage_standalone.py` 把 Stage Controller 用到的全部模块内联进了**一个文件**
+（约 2800 行 / 98 KB），不需要项目目录结构：
+
+```bash
+pip install PySide6-Essentials pyserial
+python stage_standalone.py
+```
+
+它由脚本生成，不要直接改：
+
+```bash
+python tools/build_stage_standalone.py
+```
+
+改了 `core/` 或 `ui/pages/stage_page.py` 之后重新跑一次即可。
+生成物也提交在仓库里，所以可以直接从 GitHub 下载这一个文件带走。
+
+覆盖范围：只有 Stage Controller（串口 / LAN / GPIB / 占位设备都保留）。
+主 GUI 的其它页面（Calculus、Ray Tracer 等）不在里面。
+
 ### 传输层
 
 `core/transport.py` 把「怎么连」与「说什么协议」分开，三种实现共用一套接口
