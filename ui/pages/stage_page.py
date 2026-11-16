@@ -18,6 +18,8 @@ import time
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -32,6 +34,66 @@ from PySide6.QtWidgets import (
 
 from ui.widgets import DeviceSelector
 from ui.workers import run_async
+
+
+class CenterZeroDialog(QDialog):
+    """Center and zero 的二次确认。
+
+    刻意用**下拉菜单**而不是单纯的 Yes/No 按钮：默认停在 No，
+    必须主动切换成 Yes 才会执行。这个操作会把台子开到负限位，
+    多一道需要"主动选择"的关卡，比顺手回车安全得多。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Center and zero")
+        self.setMinimumWidth(540)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        head = QLabel("⚠  This drives the stage to the negative hardware limits.")
+        # 对话框不继承主窗口的 QSS，这里用内联样式保证警告足够醒目
+        head.setStyleSheet(
+            "color:#b3261e; font-weight:600; font-size:13px;")
+        head.setWordWrap(True)
+        layout.addWidget(head)
+
+        body = QLabel(
+            "What it does:\n"
+            "   1. move X and Y to the negative hardware limits\n"
+            "   2. define that position as the temporary origin\n"
+            "   3. move to the measured centre (X=451906, Y=430490)\n"
+            "   4. define the centre as the new origin\n"
+            "\n"
+            "Moving to the limit may damage the sample, and the stage may hit "
+            "objectives or the holder on the way. Make sure the sample and every "
+            "objective are clear of the full travel range before you proceed.")
+        body.setWordWrap(True)
+        layout.addWidget(body)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Proceed:"))
+        self.choice = QComboBox()
+        self.choice.addItem("No — do not move the stage", False)
+        self.choice.addItem("Yes — drive to the limits", True)
+        self.choice.setCurrentIndex(0)          # 默认 No
+        self.choice.setMinimumWidth(300)
+        row.addWidget(self.choice, 1)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def confirmed(self) -> bool:
+        """下拉框选的是 Yes 才返回 True。"""
+        return bool(self.choice.currentData())
 
 
 class StagePage(QWidget):
@@ -450,15 +512,9 @@ class StagePage(QWidget):
     def do_center_and_zero(self) -> None:
         if self._no_device() or self._busy:
             return
-        ok = QMessageBox.warning(
-            self, "Center and zero",
-            "This will DRIVE THE STAGE TO THE NEGATIVE HARDWARE LIMITS,\n"
-            "then move to the measured centre and redefine the origin.\n\n"
-            "Make sure no microscope objectives can be hit.\n\n"
-            "Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if ok != QMessageBox.StandardButton.Yes:
+        dialog = CenterZeroDialog(self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not (accepted and dialog.confirmed()):
             self._append_log("Center and zero cancelled.")
             return
 

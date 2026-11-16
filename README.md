@@ -428,45 +428,22 @@ python tools/build_stage_standalone.py
 
 ### 加一个新设备
 
-1. 写驱动类（只依赖 `Transport`，不直接碰 pyserial）
-2. 在 `core/devices.py` 里加一条 `DeviceSpec`：
-   ```python
-   DeviceSpec(key="my_stage", name="My Stage", transports=("serial", "lan"),
-              description="...", factory=lambda tr, **o: MyStage(tr, **o))
-   ```
-3. 下拉里就会出现它 —— 界面代码不用改
+完整步骤（含可复制的模板）见 **[docs/ADDING_A_DEVICE.md](docs/ADDING_A_DEVICE.md)**。
 
-### Stage Controller
-ASI LX-4000 二维位移台（串口）：
+概括下来要碰 5 个文件：
 
-- **连接**：设备下拉（自动扫描端口）+ 波特率 + Connect / Disconnect
-- **位置**：X / Y 实时读数（单位 0.1 µm），手动 Refresh
-- **移动**：绝对位置（Go X / Go Y）、步进 jog（X± / Y±，步长可调）
-- **动作**：HALT（急停）、Define origin（把当前位置设为原点）、
-  Center and zero（回负限位 → 实测中心 → 重定义原点）
-- **日志**：每条连接尝试、串口收发错误都带时间戳显示
+```
+core/<name>.py             驱动，只依赖 Transport
+core/devices.py            登记型号（下拉里显示什么）
+ui/pages/<name>_page.py    界面，用 DeviceSelector + 自己的控件
+devicegui/<name>_app.py    独立入口（3 行）
+devicegui/base.py          登记到 DEVICE_APPS + create_device_window
+```
 
-安全设计：
-- **HALT 不受忙碌状态限制**，随时可按（急停不能被 UI 锁挡住）
-- **Center and zero 必须二次确认** —— 它会驱动到负限位，可能撞镜头
-- 所有串口操作在后台线程，界面不会冻结
-- 断开页面时自动 halt + 关闭端口，避免端口被占住
+做完之后主 GUI 会自动多一张入口卡片，`python -m devicegui.<name>_app`
+也能单独跑。
 
-协议（沿用原实现）：命令前缀 `2H `、`\r` 结尾；`:A` 接受 / `:N` 拒绝；
-`STATUS` 返回 `N` 空闲、`B` 运动中。
-
-### Plotter
-读 CSV / TSV 并画图：
-
-- **两种选列方式**：一个 X 配多列 Y，或若干独立的 X/Y 对（每对可自定义图例）
-- **布局**：合成一张图，或堆叠成多子图（可共享 X 轴）
-- **五种绘图类型**：line / scatter / bar / step / stem
-- **控制项**：标题、轴标签、轴范围、刻度步长、对数轴、网格、图例位置、
-  标记形状、线型、标记大小、图形尺寸
-- matplotlib 导航工具栏（缩放、平移、保存图片）
-- 分隔符自动检测；`.tsv` 按制表符读
-
-## 正确性
+## ## 正确性
 
 `core/` 与 `myapp` 的实现逐位一致，已用同一套光学系统对拍验证：
 
