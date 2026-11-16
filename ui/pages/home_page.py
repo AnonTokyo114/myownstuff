@@ -108,8 +108,9 @@ class HomePage(QWidget):
              "Load a CSV/TSV and plot its columns: line, scatter, bar, step or "
              "stem, single or stacked subplots."),
             ("device", "⚙", "Device Interface",
-             "Reserved for laboratory instrument control and live data "
-             "acquisition. Not implemented yet."),
+             "Launch the laboratory instruments — stage, DAQ, camera, laser, "
+             "oscilloscope. Each one opens in its own window and can also run "
+             "standalone from a terminal."),
         ]
 
         for index, (key, icon, name, desc) in enumerate(cards):

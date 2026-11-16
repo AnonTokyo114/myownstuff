@@ -274,5 +274,20 @@ class DeviceHubPage(QWidget):
 
         这些窗口本身是独立进程，不主动收掉会变成孤儿。想让它继续跑的话
         可以在终端里单独启动 —— 那条路不经过这里。
+
+        注意：先对**所有**子进程发 terminate，再统一等待。逐个 stop() 串行
+        等待的话，6 个设备最坏要等十几秒，关窗口会明显卡住。
         """
-        self.stop_all()
+        procs = list(self._procs.values())
+        for kind in list(self._procs):
+            self._stopping.add(kind)
+            proc = self._procs[kind]
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.terminate()
+
+        for proc in procs:
+            if proc.state() == QProcess.ProcessState.NotRunning:
+                continue
+            if not proc.waitForFinished(1500):
+                proc.kill()
+                proc.waitForFinished(700)

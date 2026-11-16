@@ -108,13 +108,19 @@ def create_device_window(kind: str):
 def run_device_app(kind: str) -> int:
     """独立运行一个设备 GUI 的入口。
 
-    必须在这里锁定 QT_API 并指定 matplotlib 后端 —— 与 main.py 同样的
-    理由：本机同时装了 PyQt5 和 PySide6，不锁会撞到 access violation。
+    必须在这里锁定 QT_API —— 与 main.py 同样的理由：本机同时装了
+    PyQt5 和 PySide6，不锁会撞到 access violation。
+
+    matplotlib 是**可选**的：stage / DAQ 这类设备页面根本不画图，
+    强制依赖它会让「只装 PySide6 + pyserial」的最小安装跑不起来。
     """
     os.environ.setdefault("QT_API", "pyside6")
 
-    import matplotlib
-    matplotlib.use("QtAgg")
+    try:
+        import matplotlib
+        matplotlib.use("QtAgg")
+    except ImportError:
+        pass          # 不画图的设备照常启动
 
     # 保证从任意工作目录启动都能 import core / ui
     if str(ROOT) not in sys.path:

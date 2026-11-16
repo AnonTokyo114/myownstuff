@@ -1,0 +1,16 @@
+# 只运行设备 GUI（Stage Controller / Data Acquisition）所需的最小依赖。
+#
+# 实测：只装这两个就能启动 `python -m devicegui.stage_app`，
+#       venv 约 227 MB（完整 requirements.txt 约 634 MB）。
+#
+# 注意：主 GUI（main.py）里的 Calculus / Ray / Matrix / Plotter
+#       需要 numpy scipy sympy matplotlib pandas，所以那样还得用
+#       完整的 requirements.txt。
+#
+# 安装：
+#   setup_stage.bat
+# 或者手动：
+#   .venv\Scripts\python.exe -m pip install -r requirements-stage.txt
+
+PySide6-Essentials>=6.5
+pyserial>=3.5

@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
 #: 构造函数说明格式 "模块路径:类名或工厂[工厂参数]"——
 #:   "ui.pages.calculus_page:CalculusPage"                 无参类
 #:   "ui.pages.placeholder_page:create_device_subpage:stage"  带参数的工厂
+#: 子项列表目前都为空：设备不再是内嵌子页，而是由 Device Interface
+#: 页面启动的独立 GUI（见 devicegui/）。
 PAGES = [
     ("home", "Home", "🏠", "ui.pages.home_page:HomePage", []),
     ("calculus", "Calculus", "∫", "ui.pages.calculus_page:CalculusPage", []),
