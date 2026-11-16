@@ -18,6 +18,13 @@
 
 `run.bat` 会优先用项目内的 `.venv`，没有时回退到系统 Python。
 
+只想开一个设备（不启动主界面）：
+
+```bat
+device.bat stage      等价于  python -m devicegui.stage_app
+device.bat daq        等价于  python -m devicegui.daq_app
+```
+
 ### 搬到另一台机器（比如实验室电脑）
 
 项目是**自包含**的：源码 + `setup.bat` 就能在任意机器上重建环境。
@@ -178,6 +185,15 @@ research-gui/
 │   ├── devices.py           设备注册表（下拉里的型号）
 │   ├── nidaq.py             NI-DAQ 模拟输出（DC 电压）
 │   └── stage.py             ASI LX-4000 位移台
+├── devicegui/             各设备 GUI（每个都能独立运行）
+│   ├── base.py             设备清单 + 窗口构造 + 独立运行入口
+│   ├── stage_app.py        python -m devicegui.stage_app
+│   ├── daq_app.py          python -m devicegui.daq_app
+│   ├── camera_app.py / laser_app.py / scope_app.py / others_app.py
+│   └── ...
+│
+├── device.bat              单独启动某个设备 GUI
+│
 └── ui/
     ├── main_window.py       主窗口 + 左侧导航 + QSS
     ├── workers.py           后台任务（QThreadPool 封装）
@@ -278,28 +294,49 @@ on-axis spot RMS 177.11 µm / PV 727.32 µm
 参数扫描        λ = u∓1
 ```
 
-### Device Interface 的统一交互
+### Device Interface：分类入口，而不是内嵌面板
 
-所有设备子页都遵循同一个模式（Stage Controller 已实现，其余沿用）：
+主 GUI **不内嵌**任何设备界面，只负责分类与启动。每个设备都是一个独立 GUI：
 
 ```
-Device
-[ ASI LX-4000                         ▼ ]   [↻]
-Two-axis translation stage, ASI MS-2000 controller.
-[ Connection: Serial (COM) · COM6 @ 115200 ]     ← 点开配置
-[ Connect ]                        [ Disconnect ]
-● Disconnected
+主 GUI (main.py)                    独立设备 GUI（各自一个进程）
+├─ Calculus                            
+├─ Ray Tracer                          python -m devicegui.stage_app
+├─ Matrix / Plotter          ┌──────▶  python -m devicegui.daq_app
+└─ Device Interface ─────────┤        python -m devicegui.camera_app
+   （六张入口卡片）          │        ...
+                             └──────▶ 也可以从 device.bat 启动
 ```
 
-主界面上只有三个控件：
+**Device Interface 页面上能看到什么**
 
-1. **Device** —— 设备**型号**，来自 `core/devices.py` 的注册表。
-   同一类目可以有多种型号（Stage 下现在有 `ASI LX-4000` 和 `Placeholder device`）。
-2. **Connection 按钮** —— 显示当前连接配置的摘要（如 `Serial (COM) · COM6 @ 115200`）。
-   点开是设置对话框，里面选连接方式并填参数。
-3. **Connect / Disconnect** —— 建立或断开连接（在后台线程执行）。
+每张卡片显示：
 
-这样连接参数（不常改）不占主界面，视野干净；而当前配置一眼可见，不用翻对话框确认。
+| 元素 | 说明 |
+|---|---|
+| 图标 + 名称 | 例如 `⇔ Stage Controller` |
+| 一句话说明 | 这个仪器是干什么的 |
+| 启动命令 | `python -m devicegui.stage_app`，可直接复制到终端 |
+| 运行状态 | `● Not running` / `● Running (pid 1234)` / `● Stopped` |
+| Launch / Stop | 启动或结束该设备窗口 |
+
+未实现的分类带 `placeholder` 标记，点开是说明页（会告诉我还缺什么信息）。
+
+**两种使用方式**
+
+1. **从主 GUI**：点 Launch —— 会起一个子进程，多个设备窗口可以同时开着
+2. **单独运行**：`python -m devicegui.<name>` 或 `device.bat <name>`
+
+两种方式跑的是**同一套代码**（都走 `devicegui/base.py` 的 `create_device_window`），
+所以界面和逻辑完全一致。
+
+**为什么用独立进程**
+
+- 一个设备驱动崩了不会带走主界面
+- 设备窗口可以自由摆放、同时开着
+- 主窗口关掉后，手动启动的设备窗口仍然在跑
+
+主窗口关闭时会一并结束**由它启动的**那些子进程（避免留孤儿）；手动启动的不受影响。
 
 ### 连接设置对话框
 

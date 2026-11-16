@@ -39,21 +39,9 @@ PAGES = [
     ("matrix", "Matrix Calculator", "▦",
      "ui.pages.matrix_page:MatrixCalculatorPage", []),
     ("plotter", "Plotter", "📈", "ui.pages.plotter_page:PlotterPage", []),
+    # 设备不再是内嵌子页：这里只是分类入口，点 Launch 会启动独立的设备 GUI
     ("device", "Device Interface", "⚙",
-     "ui.pages.placeholder_page:create_device_page", [
-         ("device.stage", "Stage Controller", "⇔",
-          "ui.pages.stage_page:StagePage", []),
-         ("device.camera", "Camera", "◉",
-          "ui.pages.placeholder_page:create_device_subpage:camera", []),
-         ("device.laser", "Laser", "✳",
-          "ui.pages.placeholder_page:create_device_subpage:laser", []),
-         ("device.scope", "Oscilloscope", "∿",
-          "ui.pages.placeholder_page:create_device_subpage:scope", []),
-         ("device.daq", "Data Acquisition", "⧉",
-          "ui.pages.daq_page:DaqPage", []),
-         ("device.others", "Others", "⋯",
-          "ui.pages.placeholder_page:create_device_subpage:others", []),
-     ]),
+     "ui.pages.device_hub_page:DeviceHubPage", []),
 ]
 
 
@@ -345,6 +333,33 @@ class MainWindow(QMainWindow):
             #noticeBody {
                 font-size: 12px;
                 color: #6d5a2c;
+            }
+            /* ---------- Device Interface 入口卡片 ---------- */
+            #hubIcon {
+                font-size: 17px;
+                color: #2b5ea8;
+            }
+            #hubTitle {
+                font-size: 14px;
+                font-weight: 600;
+                color: #1b1f24;
+            }
+            #hubTag {
+                font-size: 10px;
+                color: #8a6d1f;
+                background: #fdf6e3;
+                border: 1px solid #efe0b8;
+                border-radius: 8px;
+                padding: 1px 7px;
+            }
+            #hubCommand {
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 11px;
+                color: #5b6470;
+                background: #f4f6f9;
+                border: 1px solid #e3e6ea;
+                border-radius: 5px;
+                padding: 3px 7px;
             }
             /* ---------- 安全警示横幅 ---------- */
             #dangerBanner {
