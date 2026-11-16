@@ -9,6 +9,9 @@
 设计上刻意不依赖 sympy：没装也能用（B 版符号计算在 calculus_symbolic.py）。
 """
 
+import ast
+import math
+import operator
 import warnings
 
 import numpy as np
@@ -23,26 +26,80 @@ class CalculusError(ValueError):
 
 # ---------------------------------------------------------------- 积分
 
+#: 积分边界里允许出现的常量名
+_BOUND_NAMES = {
+    "pi": math.pi,
+    "e": math.e,
+    "tau": math.tau,
+    "inf": math.inf,
+    "nan": math.nan,
+}
+_BOUND_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+}
+_BOUND_UNARY = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _eval_bound_node(node):
+    """把已通过白名单的 AST 节点算成一个数。
+
+    这里**不使用 eval**：即使把 ``__builtins__`` 清空，仍能经由属性访问
+    （如 ``().__class__.__base__.__subclasses__()``）取回内建对象，从而
+    执行任意代码。边界表达式可能来自粘贴的文本，所以只允许数字常量、
+    几个已知常量名，以及 + - * / ** % 。
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            raise CalculusError("Bounds may only contain numbers.")
+        return float(node.value)
+    if isinstance(node, ast.Name):
+        if node.id in _BOUND_NAMES:
+            return _BOUND_NAMES[node.id]
+        raise CalculusError(f"Unknown name in bounds: {node.id!r}")
+    if isinstance(node, ast.BinOp):
+        fn = _BOUND_BINOPS.get(type(node.op))
+        if fn is None:
+            raise CalculusError("Unsupported operator in bounds.")
+        return fn(_eval_bound_node(node.left), _eval_bound_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        fn = _BOUND_UNARY.get(type(node.op))
+        if fn is None:
+            raise CalculusError("Unsupported operator in bounds.")
+        return fn(_eval_bound_node(node.operand))
+    raise CalculusError(
+        "Bounds may only be numbers and the operators + - * / ** %.")
+
+
 def parse_bound(text, default=None):
-    """解析积分上下限，支持 inf / -inf / pi 等写法。"""
+    """解析积分上下限，支持 inf / -inf / pi 等写法。
+
+    求值走 AST 白名单，不调用 eval —— 见 _eval_bound_node 的说明。
+    """
     if text is None:
         return default
     s = str(text).strip().lower()
     if not s:
         return default
-    s = s.replace("∞", "inf").replace("−", "-")
-    if s in ("inf", "+inf", "infinity"):
-        return float("inf")
-    if s in ("-inf", "-infinity"):
-        return float("-inf")
-    if s in ("pi", "π"):
-        return float(np.pi)
-    if s == "-pi":
-        return -float(np.pi)
+    s = (s.replace("∞", "inf")
+          .replace("π", "pi")
+          .replace("−", "-"))       # U+2212 减号
     try:
-        return float(eval(s, {"__builtins__": {}}, {"pi": np.pi, "e": np.e}))  # noqa: S307
-    except Exception as exc:
+        tree = ast.parse(s, mode="eval")
+        return _eval_bound_node(tree.body)
+    except CalculusError:
+        raise
+    except SyntaxError as exc:
         raise CalculusError(f"Cannot parse bounds: {text}") from exc
+    except (ZeroDivisionError, OverflowError, ValueError) as exc:
+        raise CalculusError(f"Cannot evaluate bounds {text!r}: {exc}") from exc
 
 
 def _as_complex(v):

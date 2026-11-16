@@ -613,8 +613,11 @@ def longitudinal_spherical(surfaces, z, pupil_heights=None, n_samples=7):
     """Axial focus position versus pupil height (longitudinal spherical aberration).
 
     For each pupil height a parallel ray is traced and its paraxial-axis crossing
-    is computed after the last real surface. LSA is quoted relative to the
-    smallest sampled height, which stands in for the paraxial limit.
+    is computed after the last real surface. The crossing is expressed relative
+    to the **last surface vertex** (z[-2]) so that every ray shares one reference
+    plane — using each ray's own intersection z would fold in the surface sag,
+    which varies with pupil height. LSA is quoted relative to the smallest
+    sampled height, which stands in for the paraxial limit.
     """
     pmax = pupil_limit(surfaces, z)
     if pupil_heights is None:
@@ -641,7 +644,11 @@ def longitudinal_spherical(surfaces, z, pupil_heights=None, n_samples=7):
         if abs(slope) < 1e-15:
             rows.append({'h': h, 'focus': None, 'lsa': None, 'status': 'parallel'})
             continue
-        rows.append({'h': h, 'focus': float(-y_b / slope), 'lsa': None,
+        # 每条光线都与最后曲面交于不同的 z（球面上 y 不同 => z 不同/sag 差）。
+        # 若只算 -y_b/slope，得到的是「相对该交点」的距离，各光线参考面不同，
+        # 相减会混入 sag 差。所以先换成绝对 z，再统一减到最后曲面的顶点 z[-2]。
+        focus_abs = z_b - y_b / slope
+        rows.append({'h': h, 'focus': float(focus_abs - z[-2]), 'lsa': None,
                      'status': ray['status']})
 
     valid = [r for r in rows if r['focus'] is not None]

@@ -18,6 +18,7 @@ import numpy as np
 import sympy as sp
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -88,6 +89,11 @@ class MatrixTable(QTableWidget):
 
     max_size = 8
 
+    #: 表格自行调整尺寸后通知宿主（宿主据此同步 rows/cols 控件）
+    size_changed = Signal(int, int)
+    #: 需要明确告诉用户的事（例如粘贴块超出上限被截断）
+    notice = Signal(str)
+
     def __init__(self, rows: int, cols: int) -> None:
         super().__init__(rows, cols)
         self.setVerticalHeaderLabels([str(i + 1) for i in range(rows)])
@@ -154,7 +160,11 @@ class MatrixTable(QTableWidget):
         super().keyPressEvent(event)
 
     def _paste_grid(self, text: str) -> None:
-        """把 '1 2; 3 4' 或 Excel 的多行多列文本铺到网格上。"""
+        """把 '1 2; 3 4' 或 Excel 的多行多列文本铺到网格上。
+
+        粘贴起点可能不在左上角，所以扩容必须按「偏移 + 块尺寸」算；
+        超出 max_size 的部分不能静默丢弃，要通过 notice 告知用户。
+        """
         grid = []
         for line in re.split(r"[\n;]+", text):
             line = line.strip("\r")
@@ -166,20 +176,32 @@ class MatrixTable(QTableWidget):
         if not grid:
             return
 
-        need_r = len(grid)
-        need_c = max(len(row) for row in grid)
-        rows = max(self.rowCount(), need_r)
-        cols = max(self.columnCount(), need_c)
-        if (rows, cols) != (self.rowCount(), self.columnCount()):
-            self.set_size(rows, cols)
-
         start_r = max(0, self.currentRow())
         start_c = max(0, self.currentColumn())
+
+        need_r = start_r + len(grid)
+        need_c = start_c + max(len(row) for row in grid)
+        rows = min(max(self.rowCount(), need_r), self.max_size)
+        cols = min(max(self.columnCount(), need_c), self.max_size)
+        if (rows, cols) != (self.rowCount(), self.columnCount()):
+            self.set_size(rows, cols)
+            self.size_changed.emit(rows, cols)
+
+        written = 0
+        dropped = 0
         for di, row in enumerate(grid):
             for dj, value in enumerate(row):
                 i, j = start_r + di, start_c + dj
                 if i < self.rowCount() and j < self.columnCount():
                     self.setItem(i, j, QTableWidgetItem(value))
+                    written += 1
+                else:
+                    dropped += 1
+
+        if dropped:
+            self.notice.emit(
+                f"Pasted {written} of {written + dropped} values — the block "
+                f"does not fit in a {self.max_size}×{self.max_size} grid.")
 
 
 # ======================================================================
@@ -233,6 +255,31 @@ class MatrixPanel(QFrame):
         self.rows_spin.valueChanged.connect(self._rebuild)
         if self.cols_spin is not None:
             self.cols_spin.valueChanged.connect(self._rebuild)
+
+        # 表格可能因粘贴自行扩容；同步控件并保持方阵/向量约束
+        self.table.size_changed.connect(self._on_table_resized)
+        self.table.notice.connect(self._show_notice)
+
+    def _on_table_resized(self, rows: int, cols: int) -> None:
+        """粘贴导致表格扩容后，把 size 控件和方阵/向量约束拉回一致。"""
+        if self.mode == "vector":
+            cols = 1
+        elif self.mode == "square":
+            rows = cols = max(rows, cols)
+
+        # 约束修正后可能又需要改表尺寸；值相同则不会再触发，不会递归
+        if (rows, cols) != (self.table.rowCount(), self.table.columnCount()):
+            self.table.set_size(rows, cols)
+
+        for spin, value in ((self.rows_spin, rows), (self.cols_spin, cols)):
+            if spin is None:
+                continue
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+    def _show_notice(self, text: str) -> None:
+        QMessageBox.warning(self, "Paste", text)
 
     def _rebuild(self) -> None:
         r = self.rows_spin.value()

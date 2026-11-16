@@ -377,10 +377,17 @@ class RayPage(QWidget):
 
         try:
             bf = best_focus(surfaces, z, 0.0, n_scan=21, n_pupil=9)
-            if bf.get("gap") is not None:
-                parts.append(f"best focus shift {bf['gap']:.2f} mm"
-                             + (f"（RMS {bf['rms'] * 1000:.1f} µm）"
-                                if bf.get("rms") is not None else ""))
+            spacing = bf.get("best_gap")
+            if spacing is not None:
+                # best_gap 是「最后曲面到像面」的绝对间距；顺带给出相对
+                # 当前像面的偏移，免得读者分不清这两个量。
+                base = bf.get("base_gap", spacing)
+                text = (f"best focus at spacing {spacing:.2f} mm "
+                        f"(shift {spacing - base:+.2f} mm from current)")
+                rms = bf.get("best_rms")
+                if rms is not None:
+                    text += f", RMS {rms * 1000:.1f} µm"
+                parts.append(text)
         except Exception:
             pass
 

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import latex_render as lr
+from core.latex_render import LatexError
 
 EXAMPLES = [
     r"\int_0^{\infty} e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}",
@@ -142,6 +143,8 @@ class FormulaPage(QWidget):
         self.font_size.valueChanged.connect(lambda _v: self.render())
         self.color.currentIndexChanged.connect(lambda _i: self.render())
 
+        self._sync_save_enabled()
+
     # ------------------------------------------------------------------
     def _pick_example(self, index: int) -> None:
         if 0 <= index < len(EXAMPLES):
@@ -154,6 +157,7 @@ class FormulaPage(QWidget):
         self.preview.setText("(click Render to preview)")
         self.source.setText("")
         self.status.setText("")
+        self._sync_save_enabled()
 
     def render(self) -> None:
         latex = self.input.toPlainText().strip()
@@ -161,16 +165,22 @@ class FormulaPage(QWidget):
             self.preview.setPixmap(QPixmap())
             self.preview.setText("(click Render to preview)")
             self._png = None
+            self._sync_save_enabled()
             return
 
         color = self.color.currentData()
-        png = lr.render_latex(latex, fontsize=self.font_size.value(),
-                              color=color)
+        try:
+            png = lr.render_latex(latex, fontsize=self.font_size.value(),
+                                  color=color)
+        except LatexError as exc:
+            self._render_failed(str(exc))
+            return
+        except Exception as exc:                 # noqa: BLE001
+            self._render_failed(f"{type(exc).__name__}: {exc}")
+            return
+
         if not png:
-            self._png = None
-            self.preview.setPixmap(QPixmap())
-            self.preview.setText("⚠ Rendering failed — check the LaTeX syntax")
-            self.status.setText("")
+            self._render_failed("empty result")
             return
 
         self._png = png
@@ -183,6 +193,20 @@ class FormulaPage(QWidget):
             self.preview.setPixmap(pix)
         self.source.setText(latex)
         self.status.setText(f"Rendered {len(png)} bytes · {self.font_size.value()}pt")
+        self._sync_save_enabled()
+
+    def _render_failed(self, reason: str) -> None:
+        """渲染失败：清掉旧图与旧源码，避免被 Save 导出一个过期的结果。"""
+        self._png = None
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText(f"⚠ Rendering failed: {reason}")
+        self.source.setText("")
+        self.status.setText("")
+        self.save_btn.setEnabled(False)
+
+    def _sync_save_enabled(self) -> None:
+        """只有确实有图时才允许保存。"""
+        self.save_btn.setEnabled(bool(self._png))
 
     def _copy(self) -> None:
         text = self.input.toPlainText().strip()
