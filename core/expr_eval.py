@@ -311,11 +311,29 @@ class CompiledExpression:
             result = eval(self._code, {"__builtins__": {}}, env)   # noqa: S307 - 已白名单校验
         return result
 
-    def function(self):
-        """把表达式包装成可被 scipy 调用的单变量函数 f(x)。"""
-        if self.variables and self.variables != {"x"}:
-            raise ExpressionError(f"Expression contains variables {sorted(self.variables)}; it is not a function of a single variable x")
-        return lambda x: self.evaluate(x=x) if self.variables else self.evaluate()
+    def function(self, name=None):
+        """把表达式包装成可被 scipy 调用的单变量函数 f(x)。
+
+        name 指定实际变量名；不传则用表达式里唯一的那个变量。
+        **不要写死成 x** —— derivative('t^2', ..., x_name='t') 之类会因此
+        直接报错（原先的实现只接受变量名恰好是 x 的表达式）。
+        """
+        if not self.variables:
+            return lambda _x=None: self.evaluate()
+        if len(self.variables) != 1:
+            raise ExpressionError(
+                f"Expression contains variables {sorted(self.variables)}; "
+                "it is not a function of a single variable")
+        var = name if name is not None else next(iter(self.variables))
+        if var not in self.variables:
+            raise ExpressionError(
+                f"Variable {var!r} is not in the expression "
+                f"(found {sorted(self.variables)})")
+
+        def f(x):
+            return self.evaluate(**{var: x})
+
+        return f
 
     def multivariable(self):
         """包装成 f(x, y, ...) 可调用对象（用于偏导）。"""

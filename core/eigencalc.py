@@ -150,9 +150,30 @@ def to_np_complex(M):
     return A
 
 
+def is_hermitian(A, tol=1e-12):
+    """严格判断矩阵是否 Hermitian（支持 2D 与批量 3D）。
+
+    不能用 ``np.allclose(A, A.conj().T)`` 的默认容差：它的 rtol=1e-5 是
+    **相对元素本身**的，对角元到 1e9 时允许约 1e4 的偏差，于是
+    ``diag(1e9+100i, 2e9-100i)`` 会被判成 Hermitian，接着交给 ``eigh``
+    （假定 Hermitian）而把 ±100i 静默丢掉。
+
+    这里改用「偏差 / 矩阵最大模量」的比例，与元素量级无关：
+    真正的 Hermitian 矩阵只有 ~1e-16 的浮点误差，远小于 1e-12。
+    """
+    arr = np.asarray(A, dtype=complex)
+    if arr.size == 0:
+        return True
+    diff = arr - np.conj(np.swapaxes(arr, -1, -2))
+    scale = float(np.max(np.abs(arr)))
+    if scale == 0.0:
+        return True
+    return bool(np.max(np.abs(diff)) <= tol * scale)
+
+
 def eigen_numeric(A):
     """返回 (特征值, 特征向量按列, 是否为 Hermitian)。"""
-    if np.allclose(A, A.conj().T):
+    if is_hermitian(A):
         w, V = np.linalg.eigh(A)                # 实特征值、正交归一向量
         return w.astype(complex), V.astype(complex), True
     w, V = np.linalg.eig(A)
@@ -306,7 +327,7 @@ def eigen_sweep(M, param, ts, fixed=None):
         stack[k] = np.array(f(float(t)), dtype=complex)
         if not np.all(np.isfinite(stack[k])):
             raise ValueError(f"matrix is not finite at {param} = {t:g}")
-    herm = bool(np.allclose(stack, np.conj(np.swapaxes(stack, 1, 2))))
+    herm = is_hermitian(stack)
     if herm:
         W, V = np.linalg.eigh(stack)
         return W.astype(complex), V.astype(complex), True

@@ -37,6 +37,14 @@ class ASIFloodError(ASICommError):
     """控制器在持续推送未经请求的字节（例如 'F\\x15F\\x15...'）。"""
 
 
+class ASIHalted(ASIError):
+    """操作被 HALT 取消。
+
+    单独成类，是为了让界面能把「用户主动急停」和「通讯/硬件错误」
+    区分开：前者不该弹红色错误框，只需说明操作已取消。
+    """
+
+
 #: 默认连接参数（原 Parameter 定义，此处仅作默认值使用）
 DEFAULT_SETTINGS = {
     "connection_type": "SERIAL",
@@ -82,9 +90,30 @@ class ASI_lx_4000:
         self.verbose = verbose
         self._lock = threading.RLock()
         self._log_cb = log_callback
+        #: HALT 置位；运动流程在每个关键点检查它并抛 ASIHalted
+        self._abort = threading.Event()
 
         if auto_connect:
             self.connect()
+
+    # ------------------------------------------------------------------
+    # 取消（HALT）状态
+    # ------------------------------------------------------------------
+    def begin_operation(self) -> None:
+        """用户发起一次新的运动操作：清掉上一次的取消标志。
+
+        只由「用户主动开始」的入口调用（go_* / set_position / jog /
+        center_and_zero），内部步骤不会清，否则 HALT 会被下一步抵消。
+        """
+        self._abort.clear()
+
+    def _check_abort(self) -> None:
+        if self._abort.is_set():
+            raise ASIHalted("Operation cancelled by HALT.")
+
+    @property
+    def is_halted(self) -> bool:
+        return self._abort.is_set()
 
     # ------------------------------------------------------------------
     # 日志
@@ -239,13 +268,18 @@ class ASI_lx_4000:
             raise ASICommError(f"Unexpected reply to {command!r}: {reply!r}")
 
     def halt(self) -> None:
-        """尽力停止运动（ASI 'HALT'）。不抛异常。"""
+        """急停：先置取消标志，再尽力发送 HALT。
+
+        置标志在发命令之前，是为了保证即使命令没发出去（或等待中的流程
+        刚好结束），后续步骤也不会继续运动。
+        """
+        self._abort.set()
         try:
             if self.is_connected:
                 self.transport.write(f"{self.ADDRESS_PREFIX}HALT\r".encode("ascii"))
                 self.transport.flush()
-                log.warning("HALT sent")
-                self._log("HALT sent")
+                log.warning("HALT sent (cancel flag set)")
+                self._log("HALT sent — remaining motion steps will be cancelled")
         except Exception as exc:                     # noqa: BLE001
             log.error("HALT failed: %s", exc)
 
@@ -253,10 +287,15 @@ class ASI_lx_4000:
     # 运动 / 位置
     # ------------------------------------------------------------------
     def wait_movement(self, timeout: float = 120.0, poll: float = 0.3) -> None:
-        """等待 STATUS 变成 'N'（空闲）。回复异常或超时会抛错。"""
+        """等待 STATUS 变成 'N'（空闲）。回复异常或超时会抛错。
+
+        若期间按了 HALT，会立刻抛 ASIHalted，不必等到超时。
+        """
         deadline = time.monotonic() + timeout
         time.sleep(0.3)
         while time.monotonic() < deadline:
+            if self._abort.is_set():
+                raise ASIHalted("Motion was cancelled by HALT.")
             status = self.query("STATUS")
             token = status.replace(":A", "").strip()[:1]
             if self.verbose:
@@ -292,10 +331,13 @@ class ASI_lx_4000:
             self._log(f"Warning: input {input_pos} > {self.POS_LIMIT} -> clamping")
             input_pos = self.POS_LIMIT
 
+        self._check_abort()          # 发命令前
         self.wait_movement()
+        self._check_abort()          # 等完之后（HALT 可能就发生在这期间）
         cmd = f"M {axis}={int(input_pos)}"
         self._check_ok(self.query(cmd), cmd)
         self.wait_movement()
+        self._check_abort()          # 停下后再检查，避免序列继续
         return self._read_pos(axis)
 
     def get_x_pos(self) -> float:
@@ -309,9 +351,11 @@ class ASI_lx_4000:
         return self._read_pos("Y")
 
     def go_x_pos(self, input_pos: float) -> float:
+        self.begin_operation()
         return self._move_abs("X", input_pos)
 
     def go_y_pos(self, input_pos: float) -> float:
+        self.begin_operation()
         return self._move_abs("Y", input_pos)
 
     # ------------------------------------------------------------------
@@ -327,20 +371,23 @@ class ASI_lx_4000:
             f"ASI_lx_4000 only supports 'x' and 'y' axes, got '{axis}'")
 
     def set_position(self, axis: str, pos: float) -> None:
-        axis = axis.lower()
-        if axis == "x":
-            self.go_x_pos(pos)
-        elif axis == "y":
-            self.go_y_pos(pos)
+        self.begin_operation()
+        axis_l = axis.lower()
+        if axis_l == "x":
+            self._move_abs("X", pos)
+        elif axis_l == "y":
+            self._move_abs("Y", pos)
         else:
             raise ValueError(
                 f"ASI_lx_4000 only supports 'x' and 'y' axes, got '{axis}'")
 
     def jog(self, axis: str, delta: float) -> float:
         """相对移动：读当前位置再走 delta（0.1 µm），返回最终位置。"""
-        current = self.get_position(axis)
-        self.set_position(axis, current + delta)
-        return self.get_position(axis)
+        self.begin_operation()
+        axis_u = axis.lower()
+        current = self.get_position(axis_u)
+        self._check_abort()
+        return self._move_abs(axis_u.upper(), current + delta)
 
     def _wait_stable(self, tolerance: float = 1.0, tries: int = 5) -> None:
         """要求相隔 0.5 s 的两次读数一致，才允许重定义原点。"""
@@ -374,7 +421,11 @@ class ASI_lx_4000:
         """负限位 -> 实测中心 -> 设为新原点。
 
         每次上电后只需跑一次；原点保持到断电。
+
+        注意：内部一律走 _move_abs，不使用 go_* —— 后者会清除 HALT 标志，
+        那样急停就只能停住当前一步，序列会接着往下走。
         """
+        self.begin_operation()       # 清除上一次的取消状态
         self._log("=== WARNING ===")
         self._log("This will drive the stage to the negative hardware limits!")
         self._log("Make sure no microscope objectives will be hit!")
@@ -384,16 +435,19 @@ class ASI_lx_4000:
             input("Press Enter to continue (Ctrl+C to cancel)... ")
 
         self._log("Moving to negative limits...")
-        x = self.go_x_pos(self.NEG_LIMIT)
-        y = self.go_y_pos(self.NEG_LIMIT)
+        x = self._move_abs("X", self.NEG_LIMIT)
+        y = self._move_abs("Y", self.NEG_LIMIT)
+        self._check_abort()
         self._log(f"Reached X={x}, Y={y}")
 
         self._log("Defining negative limit as temporary origin...")
         self.def_origin()
+        self._check_abort()
 
         self._log("Moving to measured center...")
-        self.go_x_pos(self.CENTER_X)
-        self.go_y_pos(self.CENTER_Y)
+        self._move_abs("X", self.CENTER_X)
+        self._move_abs("Y", self.CENTER_Y)
+        self._check_abort()
 
         self._log("Defining center as new origin...")
         self.def_origin()

@@ -145,25 +145,37 @@ def _is_meaningfully_complex(f, lower, upper):
 
 
 def _looks_divergent(f, lower, upper):
-    """粗判有限端点处是否有极点型发散。
+    """粗判有限端点处是否**真的**发散。
 
-    从端点向内取越来越近的点，看函数绝对值是否无界增长。quad 对 1/x 这类
-    被积函数会返回一个看似正常的数（实测 145.6），仅靠它的警告不足以提醒用户。
+    不能用「函数值 > 某个绝对值」来判断 —— 幅值大与不可积没有等价关系：
+    ``2e6*x`` 在 [0,1] 上积分就是 1e6，完全正常；``x**-0.9`` 在 0 处虽然
+    趋向无穷，但积分收敛到 10（可积的端点奇异性）。
+
+    这里看的是 ``f(bound + eps) * eps`` 随 eps -> 0 的走向：
+
+        x**-0.9 : eps**0.1      -> 0     收敛
+        1/x     : 1             -> 常数  对数发散（交给积分器 + 警告）
+        x**-1.5 : eps**-0.5     -> inf   幂律发散
+
+    只有「明显趋于无穷」才算确定发散；边界情况不拦，避免误拒正常积分。
     """
     for bound, direction in ((lower, 1), (upper, -1)):
         if not np.isfinite(bound):
             continue
-        peak = 0.0
-        for eps in (1e-2, 1e-4, 1e-6, 1e-8):
+        products = []
+        for eps in (1e-3, 1e-4, 1e-5, 1e-6):
             x = bound + direction * eps
             try:
                 v = abs(complex(f(x)))
-            except Exception:
+            except Exception:                        # noqa: BLE001
                 continue
             if not np.isfinite(v):
                 return True
-            peak = max(peak, v)
-        if peak > 1e6:
+            products.append(v * eps)
+        if len(products) < 3:
+            continue
+        # 单调增长且末尾比开头大一个量级以上 -> 幂律发散
+        if products[-1] > products[0] * 10 and products[-1] > 1e-3:
             return True
     return False
 
@@ -174,7 +186,7 @@ def integrate(expr, lower, upper, x_name="x"):
     值可能是复数：若被积函数有虚部，则实部与虚部分别积分再合成。
     """
     compiled = CompiledExpression(expr, variables=[x_name])
-    f = compiled.function() if compiled.variables else (lambda _x: compiled.evaluate())
+    f = compiled.function(x_name) if compiled.variables else (lambda _x: compiled.evaluate())
 
     if _looks_divergent(f, lower, upper):
         raise CalculusError(
@@ -182,39 +194,36 @@ def integrate(expr, lower, upper, x_name="x"):
             "若奇点在区间内部，请拆成两段分别积分。"
         )
 
-    complex_input = _is_meaningfully_complex(f, lower, upper)
-
     def _quad_scalar(g):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             val, err = _quad_mod.quad(g, lower, upper, limit=200)
             return val, err, [str(w.message) for w in caught]
 
+    # 始终分别积分实部与虚部：scipy 的 quad 对复值函数会静默丢弃虚部，
+    # 而「五点采样看虚部」并不可靠 —— 例如 i*sin(4*pi*x)^2 在
+    # 0, 0.25, 0.5, 0.75, 1 上虚部全为 0，实际积分却是 0.5i。
     notes = []
-    if complex_input:
-        try:
-            re_v, re_e, re_notes = _quad_scalar(lambda t: complex(f(t)).real)
-            im_v, im_e, im_notes = _quad_scalar(lambda t: complex(f(t)).imag)
-        except Exception as exc:
-            raise CalculusError(f"Integration failed: {exc}") from exc
-        value = complex(re_v, im_v)
-        error = max(re_e, im_e)
-        notes.extend(re_notes)
-        notes.extend(im_notes)
-        # 无条件说明：结果含虚部时，用户需要知道这是分实虚部积分得来的
+    try:
+        re_v, re_e, re_notes = _quad_scalar(lambda t: complex(f(t)).real)
+        im_v, im_e, im_notes = _quad_scalar(lambda t: complex(f(t)).imag)
+    except Exception as exc:
+        raise CalculusError(f"Integration failed: {exc}") from exc
+
+    value = complex(re_v, im_v)
+    error = max(re_e, im_e)
+    notes.extend(re_notes)
+    notes.extend(im_notes)
+    has_imag = abs(value.imag) > 1e-12 * max(1.0, abs(value.real))
+    if has_imag:
+        # 结果含实打实的虚部时才说明，避免对实数函数刷提示
         notes.insert(0, "被积函数是复值的，已对实部与虚部分别积分")
-    else:
-        try:
-            value, error, got = _quad_scalar(f)
-        except Exception as exc:
-            raise CalculusError(f"Integration failed: {exc}") from exc
-        notes.extend(got)
 
     if not np.isfinite(abs(value)):
         raise CalculusError(
             "积分结果为无穷大或无效值 —— 该积分很可能发散，或区间端点有奇点。"
         )
-    if notes and not complex_input:
+    if notes and not has_imag:
         notes.insert(0, "积分器报告了困难（结果可能不可靠，常见于奇点或强振荡）")
     if notes and abs(error) > max(1.0, abs(value)) * 1e-3:
         notes.insert(0, f"误差估计偏大（{error:.3g}），建议拆分区间或换写法")
@@ -239,7 +248,8 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
     返回 (导数值, 粗略误差估计)。
     """
     compiled = CompiledExpression(expr, variables=[x_name])
-    base = compiled.function() if compiled.variables else (lambda _x: compiled.evaluate())
+    base = (compiled.function(x_name) if compiled.variables
+            else (lambda _x: compiled.evaluate()))
 
     def f(t):
         try:
@@ -281,7 +291,8 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
 def derivative_curve(expr, xs, order=1, x_name="x"):
     """在给定点集上算导数，用于画导函数曲线。"""
     compiled = CompiledExpression(expr, variables=[x_name])
-    base = compiled.function() if compiled.variables else (lambda _x: compiled.evaluate())
+    base = (compiled.function(x_name) if compiled.variables
+            else (lambda _x: compiled.evaluate()))
     out = []
     for x in xs:
         try:
@@ -361,7 +372,8 @@ def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
 def find_singularities(expr, lower, upper, x_name="x", samples=400):
     """粗略探测区间内的可疑点（函数值突变/变为非有限）——用于解释积分困难。"""
     compiled = CompiledExpression(expr, variables=[x_name])
-    base = compiled.function() if compiled.variables else (lambda _x: compiled.evaluate())
+    base = (compiled.function(x_name) if compiled.variables
+            else (lambda _x: compiled.evaluate()))
     if not (np.isfinite(lower) and np.isfinite(upper)) or lower >= upper:
         return []
     xs = np.linspace(lower, upper, samples)

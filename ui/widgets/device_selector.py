@@ -659,10 +659,15 @@ class DeviceSelector(QFrame):
         return self._device
 
     def force_disconnect(self) -> None:
+        """页面/窗口关闭时兜底：先停住输出，再释放底层设备。
+
+        顺序：halt（位移台急停）→ stop（DAQ 归零）→ close（释放资源）。
+        这三个方法都幂等，重复调用无害；单个失败不影响其它步骤。
+        """
         device, self._device = self._device, None
         if device is None:
             return
-        for name in ("halt", "close"):
+        for name in ("halt", "stop", "close"):
             fn = getattr(device, name, None)
             if callable(fn):
                 try:

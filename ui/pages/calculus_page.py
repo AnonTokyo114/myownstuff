@@ -182,8 +182,19 @@ def _assumption_combo() -> QComboBox:
     return combo
 
 
-def _assumption_key(combo: QComboBox):
-    return ASSUMPTIONS[combo.currentIndex()][1]
+def _assumptions_for(combo: QComboBox, variables) -> dict[str, str] | None:
+    """把下拉选择转成核心层要的 ``{变量名: 假设}`` 映射。
+
+    核心的 ``_make_symbol`` 期望按**变量名**索引的字典（内部用
+    ``assumptions.get(name)``）；直接传一个字符串会在那里抛
+    ``AttributeError: 'str' object has no attribute 'get'``。
+    返回 None 表示用默认假设（real）。
+    """
+    key = ASSUMPTIONS[combo.currentIndex()][1]
+    if not key:
+        return None
+    names = [str(v).strip() for v in variables]
+    return {name: key for name in names if name}
 
 
 # ====================================================================== 积分
@@ -222,35 +233,58 @@ class IntegralTab(_BaseTab):
         lo_text = self.lower.text().strip()
         hi_text = self.upper.text().strip()
 
-        try:
-            if not lo_text and not hi_text:
-                # ---- 不定积分 ----
+        assumptions = _assumptions_for(self.assume, [var])
+
+        if not lo_text and not hi_text:
+            # ---- 不定积分 ----
+            try:
                 txt, latex, notes = cs.integrate_symbolic(
-                    expr, var, assumptions=_assumption_key(self.assume))
-                self.result.show_result(latex=latex, text=txt,
-                                        numeric="\n".join(notes) if notes else "indefinite integral")
+                    expr, var, assumptions=assumptions)
+            except Exception as exc:
+                self.result.show_result(error=f"{type(exc).__name__}: {exc}")
                 return
+            self.result.show_result(
+                latex=latex, text=txt,
+                numeric="\n".join(notes) if notes else "indefinite integral")
+            return
 
-            if not lo_text or not hi_text:
-                self.result.show_result(error="A definite integral needs both bounds")
-                return
+        if not lo_text or not hi_text:
+            self.result.show_result(error="A definite integral needs both bounds")
+            return
 
+        # 数值和符号各算各的：一边失败不该丢掉另一边已经算好的结果。
+        lines: list[str] = []
+        warns: list[str] = []
+        notes: list[str] = []
+        numeric_value = None
+        symbolic_text = symbolic_latex = None
+
+        try:
             lo = cn.parse_bound(lo_text)
             hi = cn.parse_bound(hi_text)
-            value, err, warns = cn.integrate(expr, lo, hi, x_name=var)
-            txt, latex, notes = cs.integrate_symbolic(
-                expr, var, lower=lo, upper=hi,
-                assumptions=_assumption_key(self.assume))
-
-            lines = [f"Numeric result: {value}"]
+            numeric_value, err, warns = cn.integrate(expr, lo, hi, x_name=var)
+            lines.append(f"Numeric result: {numeric_value}")
             lines.append(f"Error estimate: ±{err:.3e}")
-            if txt:
-                lines.append(f"Symbolic result: {txt}")
-            for w in (warns or []) + (notes or []):
-                lines.append(f"Note: {w}")
-            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
         except Exception as exc:
-            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+            lines.append(f"Numeric failed: {type(exc).__name__}: {exc}")
+
+        try:
+            # 传原始文本而不是 float：符号层自己解析，pi 这类值不会被截成 3
+            symbolic_text, symbolic_latex, notes = cs.integrate_symbolic(
+                expr, var, lower=lo_text, upper=hi_text,
+                assumptions=assumptions)
+            lines.append(f"Symbolic result: {symbolic_text}")
+        except Exception as exc:
+            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+
+        for w in (warns or []) + (notes or []):
+            lines.append(f"Note: {w}")
+
+        if numeric_value is None and symbolic_text is None:
+            self.result.show_result(error="\n".join(lines))
+            return
+        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
+                                numeric="\n".join(lines))
 
 
 # ====================================================================== 导数
@@ -295,14 +329,12 @@ class DerivativeTab(_BaseTab):
             self.result.show_result(error="The evaluation point must be a number")
             return
 
+        assumptions = _assumptions_for(self.assume, [var])
         try:
-            txt, latex = cs.differentiate(expr, var,
-                                          assumptions=_assumption_key(self.assume))
             order = self.order.value()
-            if order == 2:
-                txt2, latex2 = cs.differentiate(txt, var,
-                                                assumptions=_assumption_key(self.assume))
-                txt, latex = txt2, latex2
+            # 直接对原式求 order 阶导，不把一阶结果重新解析一遍
+            txt, latex = cs.differentiate(expr, var, order=order,
+                                          assumptions=assumptions)
             value, err = cn.derivative(expr, x0, order=order, x_name=var)
 
             lines = [f"{'second' if order == 2 else 'first'} derivative at {var} = {x0}: {value}",
@@ -378,7 +410,7 @@ class PartialTab(_BaseTab):
                 return
 
         try:
-            assume = _assumption_key(self.assume)
+            assume = _assumptions_for(self.assume, variables)
             txt, latex = cs.partial(expr, variables, var,
                                     order=self.order.value(), assumptions=assume)
             value, err = cn.partial_derivative(expr, variables, point, var,

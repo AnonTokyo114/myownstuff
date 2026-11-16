@@ -9,6 +9,7 @@ sympy 是可选依赖：没装时本模块的 available() 返回 False，
 """
 
 import ast
+import math
 
 from .expr_eval import ExpressionError, preprocess
 
@@ -22,6 +23,56 @@ class SymbolicError(ValueError):
     """符号计算失败（无法解析、无法积分等）。"""
 
 
+#: 边界里常见的符号常量（先查表，保住 pi 这类值的精确性）
+_BOUND_SYMBOLS = {
+    "pi": lambda sp: sp.pi, "π": lambda sp: sp.pi,
+    "e": lambda sp: sp.E,
+    "inf": lambda sp: sp.oo, "+inf": lambda sp: sp.oo,
+    "infinity": lambda sp: sp.oo, "∞": lambda sp: sp.oo,
+    "-inf": lambda sp: -sp.oo, "-infinity": lambda sp: -sp.oo,
+    "-∞": lambda sp: -sp.oo,
+    "oo": lambda sp: sp.oo, "-oo": lambda sp: -sp.oo,
+}
+
+
+def _sympy_bound(value):
+    """把积分边界转成 SymPy 数值。
+
+    不能用 ``sp.Integer()``：``sp.Integer(0.5)`` 会截断成 0，
+    ``sp.Integer(float('inf'))`` 会直接抛错。所以按类型分别处理：
+
+      * 字符串 -> 先查符号常量表（pi/e/inf），再试精确有理数（"0.5"/"1/3"），
+        最后走受限 AST 求值（与数值层同一套规则，不用 eval）
+      * float  -> Float 保留精度；±inf 映射到 oo/-oo
+    """
+    sp = _require()
+    if isinstance(value, str):
+        raw = value.strip()
+        table = _BOUND_SYMBOLS.get(raw.lower())
+        if table is not None:
+            return table(sp)
+        # "0.5" / "1/3" 这类按精确有理数处理，避免浮点尾数
+        try:
+            return sp.Rational(raw)
+        except Exception:                            # noqa: BLE001
+            pass
+        from .calculus_numeric import CalculusError, parse_bound
+        try:
+            number = parse_bound(raw)
+        except CalculusError as exc:
+            raise SymbolicError(f"Cannot parse bound {value!r}: {exc}") from exc
+        return sp.Float(number)
+
+    if isinstance(value, float):
+        if math.isinf(value):
+            return sp.oo if value > 0 else -sp.oo
+        if math.isnan(value):
+            raise SymbolicError("Bound is NaN")
+        return sp.Float(value)
+
+    return sp.Integer(int(value))
+
+
 def available():
     """sympy 是否可用。"""
     return _sp is not None
@@ -33,16 +84,36 @@ def _require():
     return _sp
 
 
-#: 允许出现的符号函数名（与 expr_eval 的白名单保持一致）
-_ALLOWED_FUNCS = {
-    "sin", "cos", "tan", "asin", "acos", "atan",
-    "sinh", "cosh", "tanh", "exp", "log", "log10", "log2",
-    "sqrt", "cbrt", "Abs",
-    # 复数
-    "re", "im", "conjugate", "arg",
+#: 允许出现的符号函数：名字 -> 如何从 sympy 取到（必要时包一层）。
+#:
+#: 不能直接 ``getattr(sp, name)`` —— sympy 里没有 ``log10`` / ``log2``
+#: 这两个属性（只有 ``log(x, base)``），那样调用会抛 AttributeError。
+#: 显式列出来也顺便对齐了数值层的命名（abs/sign/re/im/conjugate/arg）。
+_FUNC_BUILDERS = {
+    "sin": lambda sp: sp.sin,
+    "cos": lambda sp: sp.cos,
+    "tan": lambda sp: sp.tan,
+    "asin": lambda sp: sp.asin,
+    "acos": lambda sp: sp.acos,
+    "atan": lambda sp: sp.atan,
+    "sinh": lambda sp: sp.sinh,
+    "cosh": lambda sp: sp.cosh,
+    "tanh": lambda sp: sp.tanh,
+    "exp": lambda sp: sp.exp,
+    "log": lambda sp: sp.log,
+    "log10": lambda sp: (lambda x: sp.log(x, 10)),
+    "log2": lambda sp: (lambda x: sp.log(x, 2)),
+    "sqrt": lambda sp: sp.sqrt,
+    "cbrt": lambda sp: sp.cbrt,
+    "abs": lambda sp: sp.Abs,
+    "Abs": lambda sp: sp.Abs,
+    # sign 由 abs 求导自然产生，放开它，二阶导数才不会卡住
+    "sign": lambda sp: sp.sign,
+    "re": lambda sp: sp.re,
+    "im": lambda sp: sp.im,
+    "conjugate": lambda sp: sp.conjugate,
+    "arg": lambda sp: sp.arg,
 }
-
-_NAME_MAP = {"abs": "Abs"}
 
 
 def _make_symbol(name, assumptions=None):
@@ -123,13 +194,15 @@ def _safe_sympify(expr, variables, assumptions=None):
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise SymbolicError("Only direct function calls are allowed")
-            fname = _NAME_MAP.get(node.func.id, node.func.id)
-            if fname not in _ALLOWED_FUNCS:
-                raise SymbolicError(f"Symbolic computation does not support function: {node.func.id}")
+            fname = node.func.id
+            builder = _FUNC_BUILDERS.get(fname)
+            if builder is None:
+                raise SymbolicError(
+                    f"Symbolic computation does not support function: {fname}")
             args = [walk(a) for a in node.args]
             if node.keywords:
                 raise SymbolicError("Keyword arguments are not supported")
-            return getattr(sp, fname)(*args)
+            return builder(sp)(*args)
         raise SymbolicError(f"Unsupported syntax: {type(node).__name__}")
 
     return walk(tree)
@@ -146,12 +219,18 @@ def _fmt(expr, pretty=True):
     return str(expr)
 
 
-def differentiate(expr, var="x", assumptions=None):
-    """符号求导，返回 (结果字符串, LaTeX 字符串)。"""
+def differentiate(expr, var="x", order=1, assumptions=None):
+    """符号求导，返回 (结果字符串, LaTeX 字符串)。
+
+    order 直接作用在**原表达式**上（``sp.diff(expr, sym, order)``），
+    而不是把一阶结果转成字符串再解析一遍 —— 后者会遇到 ``abs(x)`` 的导数
+    ``sign(x)`` 这类不在输入白名单里的符号，从而在二阶求导出错。
+    """
     sp = _require()
     expr_s = _safe_sympify(expr, [var], assumptions)
     symbol = _make_symbol(var, assumptions)
-    result = sp.diff(expr_s, symbol)
+    order = max(1, int(order))
+    result = sp.diff(expr_s, symbol, order)
     result = sp.simplify(result)
     return str(result), sp.latex(result)
 
@@ -175,11 +254,8 @@ def integrate_symbolic(expr, var="x", lower=None, upper=None, assumptions=None):
 
     if lower is None or upper is None:
         raise SymbolicError("A definite integral requires both bounds")
-    try:
-        lo = sp.sympify(lower) if isinstance(lower, str) else sp.Integer(lower)
-        hi = sp.sympify(upper) if isinstance(upper, str) else sp.Integer(upper)
-    except Exception as exc:
-        raise SymbolicError(f"Cannot parse bounds: {exc}") from exc
+    lo = _sympy_bound(lower)
+    hi = _sympy_bound(upper)
     result = sp.integrate(expr_s, (symbol, lo, hi))
     if result.has(sp.Integral):
         raise SymbolicError("sympy could not find a closed form for this integral")

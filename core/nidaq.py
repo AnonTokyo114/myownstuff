@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from typing import Callable
 
 log = logging.getLogger("nidaq")
@@ -34,6 +35,27 @@ except Exception:                                    # pragma: no cover
 
 class NIError(RuntimeError):
     """NI-DAQ 相关的可读错误。"""
+
+
+@dataclass(frozen=True)
+class StopResult:
+    """stop() 的结果。
+
+    「驱动 0 V」和「释放 DAQ task」是两件事：释放总能做到，但写 0 V 可能
+    因为驱动报错或连接已断而失败。失败时输出可能仍然带电，调用方**必须**
+    据此显示「状态未知」，不能假装已经归零。
+    """
+
+    #: 是否确认成功写入 0 V
+    zeroed: bool
+    #: task 是否已释放
+    released: bool
+    #: 归零失败时的错误信息
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.zeroed and self.released
 
 
 def driver_available() -> bool:
@@ -206,22 +228,45 @@ class NIDaqDevice:
         self._log(f"Output {value:.3f} V on {self.channel}")
         return value
 
-    def stop(self) -> None:
-        """驱动 0 V，然后释放 task。不抛异常。"""
+    def stop(self) -> StopResult:
+        """驱动 0 V，然后释放 task。
+
+        归零失败时**不**把 last_applied 记成 0，而是记为 None（未知），
+        让界面显示「输出状态未知」而不是「已停止」。
+        """
+        error: str | None = None
+        zeroed = False
         with self._lock:
             if self._task is not None:
                 try:
                     self._task.write(0.0)
+                    zeroed = True
                     self._log("Set 0 V before releasing the task")
                 except Exception as exc:             # noqa: BLE001
+                    error = str(exc)
                     log.warning("failed to write 0 V: %s", exc)
-            self._close_task()
-        self.last_applied = 0.0
-        self.warned = False
+                    self._log(
+                        f"WARNING: could NOT set 0 V — the output may still be "
+                        f"live ({exc})")
+                self._close_task()
+            else:
+                # 本来就没有 task 在跑，可以认为端子上没有本程序施加的输出
+                zeroed = True
+            released = self._task is None
+
+        if zeroed:
+            self.last_applied = 0.0
+            self.warned = False
+        else:
+            self.last_applied = None
+        return StopResult(zeroed=zeroed, released=released, error=error)
 
     def status_text(self) -> str:
         if not self._connected:
             return "Idle (not connected)"
+        if self.last_applied is None:
+            return (f"Output state UNKNOWN on {self.channel} — "
+                    "zeroing failed, check the hardware")
         if self._task is None:
             return "Idle (output not running)"
         return f"Outputting {self.last_applied:.3f} V on {self.channel}"
@@ -297,12 +342,15 @@ class PlaceholderDaq:
         self._log(f"Placeholder output {value:.3f} V on {self.channel}")
         return value
 
-    def stop(self) -> None:
+    def stop(self) -> StopResult:
         self.last_applied = 0.0
         self.warned = False
         self._log("Placeholder output set to 0 V")
+        return StopResult(zeroed=True, released=True)
 
     def status_text(self) -> str:
         if not self._connected:
             return "Idle (not connected)"
+        if self.last_applied is None:
+            return f"Placeholder: output state UNKNOWN on {self.channel}"
         return f"Placeholder: {self.last_applied:.3f} V on {self.channel}"

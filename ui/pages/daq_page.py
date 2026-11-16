@@ -367,12 +367,28 @@ class DaqPage(QWidget):
         def work():
             stopper = getattr(dev, "stop", None)
             if callable(stopper):
-                stopper()
+                return stopper()
             return None
 
-        def done(_) -> None:
-            self._sync_voltage(0.0)
-            self._set_busy(False, "Stopped: 0 V, task released.")
+        def done(result) -> None:
+            # stop() 返回 StopResult；老接口可能返回 None，按成功处理
+            zeroed = getattr(result, "zeroed", True)
+            if zeroed:
+                self._sync_voltage(0.0)
+                self._set_busy(False, "Stopped: 0 V confirmed, task released.")
+            else:
+                error = getattr(result, "error", None) or "unknown error"
+                self._sync_voltage(0.0)
+                self._set_busy(
+                    False,
+                    "⚠ Zeroing FAILED — output state UNKNOWN "
+                    f"({error}). The channel may still be live.")
+                QMessageBox.critical(
+                    self, "Zeroing failed",
+                    "Could not write 0 V to the DAQ channel.\n\n"
+                    f"{error}\n\n"
+                    "The output may still be live. Check the hardware (or power "
+                    "down the laser) before continuing.")
             self._update_status()
 
         def failed(msg: str) -> None:
@@ -400,10 +416,18 @@ class DaqPage(QWidget):
         self.channel_edit.setEnabled(not connected and idle)
 
     # ------------------------------------------------------------------
-    def closeEvent(self, event) -> None:      # noqa: N802
-        """关闭页面时先归零再断开，避免留下非零输出。"""
+    def cleanup(self) -> None:
+        """释放设备：先归零（force_disconnect 会先 halt 再 close），再断开。
+
+        主窗口关闭时不会触发子页面的 closeEvent，所以由 MainWindow 统一
+        调用这个方法（见 ui/main_window.py 的 closeEvent）。
+        """
         try:
             self.selector.force_disconnect()
         except Exception:                            # noqa: BLE001
             pass
+
+    def closeEvent(self, event) -> None:      # noqa: N802
+        """关闭页面时先归零再断开，避免留下非零输出。"""
+        self.cleanup()
         super().closeEvent(event)

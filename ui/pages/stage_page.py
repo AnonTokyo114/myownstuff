@@ -315,6 +315,14 @@ class StagePage(QWidget):
             return True
         return False
 
+    def _handle_failure(self, what: str, message: str) -> None:
+        """统一处理后台操作失败：HALT 取消与真实错误区别对待。"""
+        if "cancelled by HALT" in message or "cancelled by halt" in message:
+            self._set_busy(False, f"{what} cancelled by HALT.")
+            return
+        self._set_busy(False, f"{what} failed: {message}")
+        QMessageBox.critical(self, f"{what} failed", message)
+
     def _blocked(self) -> bool:
         """忙碌时给一句可见的解释 —— 否则用户会觉得按钮没反应。"""
         if self._busy:
@@ -358,8 +366,7 @@ class StagePage(QWidget):
             self._set_busy(False, f"Moved {axis.upper()} to {final:.0f}")
 
         def failed(msg: str) -> None:
-            self._set_busy(False, f"Move failed: {msg}")
-            QMessageBox.critical(self, "Move failed", msg)
+            self._handle_failure("Move", msg)
 
         self._set_busy(True, f"Moving {axis.upper()} to {target:.0f}…")
         run_async(work, done, failed)
@@ -384,8 +391,7 @@ class StagePage(QWidget):
                            f"Jogged {axis.upper()} by {step:+.0f} → {final:.0f}")
 
         def failed(msg: str) -> None:
-            self._set_busy(False, f"Jog failed: {msg}")
-            QMessageBox.critical(self, "Jog failed", msg)
+            self._handle_failure("Jog", msg)
 
         self._set_busy(True, f"Jogging {axis.upper()} {step:+.0f}…")
         run_async(work, done, failed)
@@ -436,8 +442,7 @@ class StagePage(QWidget):
             self._set_busy(False, "Origin defined.")
 
         def failed(msg: str) -> None:
-            self._set_busy(False, f"Define origin failed: {msg}")
-            QMessageBox.critical(self, "Define origin failed", msg)
+            self._handle_failure("Define origin", msg)
 
         self._set_busy(True, "Defining origin…")
         run_async(work, done, failed)
@@ -472,8 +477,7 @@ class StagePage(QWidget):
             self._set_busy(False, "Center and zero finished.")
 
         def failed(msg: str) -> None:
-            self._set_busy(False, f"Center and zero failed: {msg}")
-            QMessageBox.critical(self, "Center and zero failed", msg)
+            self._handle_failure("Center and zero", msg)
 
         self._set_busy(True, "Centering… (this can take a while)")
         run_async(work, done, failed)
@@ -500,9 +504,17 @@ class StagePage(QWidget):
         self._append_log(f"Log saved to {path}")
 
     # ------------------------------------------------------------------
-    def closeEvent(self, event) -> None:      # noqa: N802
+    def cleanup(self) -> None:
+        """释放设备：先 HALT 再关串口。
+
+        主窗口关闭不会触发子页面的 closeEvent，所以由 MainWindow 统一
+        调用（见 ui/main_window.py 的 closeEvent）。
+        """
         try:
             self.selector.force_disconnect()
-        except Exception:
+        except Exception:                            # noqa: BLE001
             pass
+
+    def closeEvent(self, event) -> None:      # noqa: N802
+        self.cleanup()
         super().closeEvent(event)

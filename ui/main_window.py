@@ -10,6 +10,7 @@ HomePage 通过 `navigate` 信号请求跳转，主窗口负责把它翻译成"�
 from __future__ import annotations
 
 import importlib
+import logging
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
@@ -184,6 +185,27 @@ class MainWindow(QMainWindow):
                 hook()
             except Exception as exc:                 # 钩子失败不该拖垮导航
                 self._status.showMessage(f"Page initialization error: {exc}")
+
+    # ------------------------------------------------------------------ 退出
+    def closeEvent(self, event) -> None:      # noqa: N802
+        """关闭主窗口前，统一清理所有已构造页面的设备。
+
+        子页面放在 QStackedWidget 里，主窗口关闭**不会**触发它们的
+        closeEvent，所以必须在这里主动收尾：DAQ 归零、位移台停止、
+        串口/网口释放。未创建过的页面（懒加载）没有设备，自然跳过。
+
+        清理失败只记录，不阻止退出 —— 否则窗口关不掉。
+        """
+        for key, page in list(self._pages.items()):
+            cleanup = getattr(page, "cleanup", None)
+            if not callable(cleanup):
+                continue
+            try:
+                cleanup()
+            except Exception as exc:                 # noqa: BLE001
+                logging.getLogger("research").warning(
+                    "cleanup failed for page %r: %s", key, exc)
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ 样式
     def _apply_style(self) -> None:
