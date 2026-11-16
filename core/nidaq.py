@@ -249,8 +249,16 @@ class NIDaqDevice:
                         f"WARNING: could NOT set 0 V — the output may still be "
                         f"live ({exc})")
                 self._close_task()
+            elif self.last_applied is None:
+                # task 已经没了，但上一次归零**失败**过 —— 端子状态仍然未知。
+                # 「task 已释放」不等于「输出为 0 V」，不能据此报成功。
+                zeroed = False
+                error = ("unknown output state from an earlier failed zeroing; "
+                         "the DAQ task is gone, so it cannot be re-driven here")
+                self._log("WARNING: output state still UNKNOWN from an earlier "
+                          "failed zeroing")
             else:
-                # 本来就没有 task 在跑，可以认为端子上没有本程序施加的输出
+                # 从未写过非零值（或上次已成功归零），可以认为端子上没有输出
                 zeroed = True
             released = self._task is None
 
@@ -258,6 +266,7 @@ class NIDaqDevice:
             self.last_applied = 0.0
             self.warned = False
         else:
+            # 保持未知，直到有一次**成功的硬件写零**为止
             self.last_applied = None
         return StopResult(zeroed=zeroed, released=released, error=error)
 

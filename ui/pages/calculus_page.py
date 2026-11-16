@@ -98,7 +98,14 @@ class ResultPanel(QWidget):
         self._numeric.setPlainText(numeric or text or "")
 
         if latex:
-            png = lr.render_latex(latex)
+            png = None
+            render_error = ""
+            try:
+                png = lr.render_latex(latex)
+            except Exception as exc:             # noqa: BLE001
+                # mathtext 只支持数学模式子集：cases / aligned 这类 LaTeX
+                # 会抛 LatexError。预览失败不该把已经算好的数值和源码吞掉。
+                render_error = str(exc)
             if png:
                 pix = QPixmap()
                 if pix.loadFromData(png):
@@ -108,6 +115,15 @@ class ResultPanel(QWidget):
                         pix = pix.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
                     self._image.setPixmap(pix)
                     return
+            elif render_error:
+                self._image.setPixmap(QPixmap())
+                self._image.setStyleSheet("color:#8a6d1f;")
+                self._image.setText(
+                    "(LaTeX preview unavailable — the result contains syntax "
+                    "mathtext cannot draw, such as a Piecewise/cases expression. "
+                    "The source and numbers below are still valid.)\n\n"
+                    + render_error)
+                return
         self._image.setText(text or "(no LaTeX result)")
 
     def _copy_source(self) -> None:

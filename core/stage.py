@@ -286,15 +286,19 @@ class ASI_lx_4000:
     # ------------------------------------------------------------------
     # 运动 / 位置
     # ------------------------------------------------------------------
-    def wait_movement(self, timeout: float = 120.0, poll: float = 0.3) -> None:
+    def wait_movement(self, timeout: float = 120.0, poll: float = 0.3,
+                      honour_abort: bool = True) -> None:
         """等待 STATUS 变成 'N'（空闲）。回复异常或超时会抛错。
 
-        若期间按了 HALT，会立刻抛 ASIHalted，不必等到超时。
+        honour_abort=True（默认）用于运动流程：HALT 后立刻抛 ASIHalted，
+        不必等到超时。
+        honour_abort=False 用于**只读**操作：HALT 之后仍然要能读当前位置，
+        读位置既不该重启被取消的流程，也不该被它挡住。
         """
         deadline = time.monotonic() + timeout
         time.sleep(0.3)
         while time.monotonic() < deadline:
-            if self._abort.is_set():
+            if honour_abort and self._abort.is_set():
                 raise ASIHalted("Motion was cancelled by HALT.")
             status = self.query("STATUS")
             token = status.replace(":A", "").strip()[:1]
@@ -341,13 +345,13 @@ class ASI_lx_4000:
         return self._read_pos(axis)
 
     def get_x_pos(self) -> float:
-        """当前 X 位置（0.1 µm）。"""
-        self.wait_movement()
+        """当前 X 位置（0.1 µm）。只读，不受 HALT 影响。"""
+        self.wait_movement(honour_abort=False)
         return self._read_pos("X")
 
     def get_y_pos(self) -> float:
-        """当前 Y 位置（0.1 µm）。"""
-        self.wait_movement()
+        """当前 Y 位置（0.1 µm）。只读，不受 HALT 影响。"""
+        self.wait_movement(honour_abort=False)
         return self._read_pos("Y")
 
     def go_x_pos(self, input_pos: float) -> float:

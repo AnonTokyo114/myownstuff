@@ -241,8 +241,18 @@ class DaqPage(QWidget):
             self.apply_output()
 
     def _update_banner(self) -> None:
-        """当前电压达到阈值时显示红色横幅。"""
+        """红色横幅：输出状态未知时最优先，其次是超过安全阈值。"""
         dev = self.device
+
+        # 归零失败过 -> 端子可能还带电，这比阈值提示更要紧
+        if dev is not None and getattr(dev, "last_applied", 0.0) is None:
+            self.warn_text.setText(
+                "⚠  OUTPUT STATE UNKNOWN — the last zeroing failed, so the "
+                "channel may still be live. Check the hardware (or power down "
+                "the laser) before touching anything.")
+            self.warn_banner.setVisible(True)
+            return
+
         threshold = getattr(dev, "WARN_THRESHOLD", 1.0) if dev else 1.0
         volts = self.volt_spin.value()
         if volts >= threshold:
@@ -342,10 +352,22 @@ class DaqPage(QWidget):
         run_async(work, done, failed)
 
     def _restore_last_value(self) -> None:
-        """用户拒绝安全确认时，把滑块退回上一次成功输出的值。"""
+        """用户拒绝安全确认时，把滑块退回上一次**确认过**的输出值。
+
+        如果上一次归零失败，last_applied 是 None（输出状态未知），这时
+        没有可信的数值可以回退 —— 保持当前显示，并明确提示未知，
+        而不是 float(None) 崩掉、也不是假装回到某个电压。
+        """
         dev = self.device
-        last = float(getattr(dev, "last_applied", 0.0)) if dev else 0.0
-        self._sync_voltage(last)
+        last = getattr(dev, "last_applied", 0.0) if dev is not None else 0.0
+        if last is None:
+            self._append_log(
+                "Output state is UNKNOWN (an earlier zeroing failed); "
+                "the slider was left as-is. Check the hardware.")
+            self._update_banner()
+            self._update_status()
+            return
+        self._sync_voltage(float(last))
 
     def _sync_voltage(self, volts: float) -> None:
         self.volt_spin.blockSignals(True)
@@ -378,7 +400,8 @@ class DaqPage(QWidget):
                 self._set_busy(False, "Stopped: 0 V confirmed, task released.")
             else:
                 error = getattr(result, "error", None) or "unknown error"
-                self._sync_voltage(0.0)
+                # 不要在这里把滑块归零：那会让横幅按「电压低于阈值」隐藏，
+                # 而真实状态恰恰是未知。保留原值，只更新提示。
                 self._set_busy(
                     False,
                     "⚠ Zeroing FAILED — output state UNKNOWN "
@@ -389,6 +412,7 @@ class DaqPage(QWidget):
                     f"{error}\n\n"
                     "The output may still be live. Check the hardware (or power "
                     "down the laser) before continuing.")
+            self._update_banner()
             self._update_status()
 
         def failed(msg: str) -> None:

@@ -145,5 +145,14 @@ def run_device_app(kind: str) -> int:
     window = create_device_window(kind)
     window.setWindowTitle(f"{app_text.title} — Personal Research")
     window.resize(1120, 840)
+
+    # 独立窗口必须自己套主题：QSS 不会从主窗口继承过来，
+    # 否则 #danger（HALT / Stop）之类的样式全部失效。
+    try:
+        from ui.theme import apply_theme
+        apply_theme(window)
+    except Exception:                            # noqa: BLE001
+        pass
+
     window.show()
     return app.exec()

@@ -2,18 +2,27 @@
 
 这里**不内嵌**任何设备面板。每个设备都是独立的 GUI，可以：
 
-  * 从本页面点 Launch 启动（子进程，互不影响，可同时开多个）
+  * 从本页面点 Launch 启动
   * 或者在终端里直接运行 ``python -m devicegui.stage_app``
 
-所以主窗口关了，已经启动的设备窗口仍然在跑；反过来某个设备驱动崩了，
-也带不走主界面。
+**生命周期是解耦的**：设备窗口由它自己关闭，主窗口退出不会结束它们。
+反过来，某个设备驱动崩了也带不走主界面。
+
+为什么入口不提供 "Stop"：
+
+    用 QProcess.terminate() 结束子进程时，Linux 上那是 SIGTERM ——
+    进程直接死掉，Qt 根本收不到 closeEvent，于是设备的 halt()/stop()/
+    close() 全都没机会执行。位移台可能还在动，DAQ 可能还带着电压。
+    与其给一个看起来能停、实际绕过安全清理的按钮，不如让用户去关那个
+    设备窗口本身（那条路径会走完整的清理流程）。
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, Qt, Signal
+from PySide6.QtCore import QProcess, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -28,16 +37,47 @@ from devicegui.base import DEVICE_APPS, ROOT, DeviceApp
 
 #: 卡片状态
 IDLE = "idle"
-STARTING = "starting"
 RUNNING = "running"
 EXITED = "exited"
+
+#: 多久检查一次子进程是否还活着（毫秒）
+POLL_MS = 2000
+#: 启动后多久做第一次存活检查（太短会把还在初始化的进程误判成已退出）
+FIRST_CHECK_MS = 2500
+
+
+def pid_alive(pid: int) -> bool:
+    """跨平台判断 PID 是否还活着。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)          # 只探测，不真正发信号
+        return True
+    except OSError:
+        return False
 
 
 class DeviceCard(QFrame):
     """一个设备入口卡片：图标/标题、说明、运行状态、启动按钮。"""
 
     launch_requested = Signal(str)
-    stop_requested = Signal(str)
 
     def __init__(self, app: DeviceApp, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -75,6 +115,7 @@ class DeviceCard(QFrame):
         cmd = QLabel(f"python -m {app.module}")
         cmd.setObjectName("hubCommand")
         cmd.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        cmd.setToolTip("Run this in a terminal to start the device on its own")
         layout.addWidget(cmd)
 
         foot = QHBoxLayout()
@@ -85,25 +126,18 @@ class DeviceCard(QFrame):
 
         self.action_btn = QPushButton("Launch")
         self.action_btn.setObjectName("primary")
-        self.action_btn.setFixedWidth(96)
-        self.action_btn.clicked.connect(self._on_action)
+        self.action_btn.setFixedWidth(110)
+        self.action_btn.clicked.connect(
+            lambda: self.launch_requested.emit(self.app.key))
         foot.addWidget(self.action_btn)
         layout.addLayout(foot)
 
         self._apply_state(IDLE)
 
-    # ------------------------------------------------------------------
-    def _on_action(self) -> None:
-        if self._state in (STARTING, RUNNING):
-            self.stop_requested.emit(self.app.key)
-        else:
-            self.launch_requested.emit(self.app.key)
-
     def _apply_state(self, state: str, detail: str = "") -> None:
         self._state = state
         colors = {
             IDLE: ("● Not running", "#9aa3ae"),
-            STARTING: ("● Starting…", "#b26a00"),
             RUNNING: ("● Running", "#2e7d32"),
             EXITED: ("● Exited", "#9aa3ae"),
         }
@@ -113,15 +147,17 @@ class DeviceCard(QFrame):
         self.state_label.setText(text)
         self.state_label.setStyleSheet(f"color:{color};")
 
-        if state in (STARTING, RUNNING):
-            self.action_btn.setText("Stop")
-            self.action_btn.setObjectName("ghost")
-            self.action_btn.setEnabled(state == RUNNING)
+        if state == RUNNING:
+            self.action_btn.setText("Running")
+            self.action_btn.setEnabled(False)
+            self.action_btn.setToolTip(
+                "Close that device window to stop it — the launcher never "
+                "kills it, so the device gets a chance to halt and release.")
         else:
             self.action_btn.setText("Launch")
-            self.action_btn.setObjectName("primary")
             self.action_btn.setEnabled(True)
-        # 改了 objectName 需要重新应用样式
+            self.action_btn.setToolTip("Start this device in its own window")
+        self.action_btn.setObjectName("primary")
         self.action_btn.style().unpolish(self.action_btn)
         self.action_btn.style().polish(self.action_btn)
 
@@ -134,10 +170,8 @@ class DeviceHubPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._procs: dict[str, QProcess] = {}
+        self._pids: dict[str, int] = {}
         self._cards: dict[str, DeviceCard] = {}
-        #: 正在由本页主动停止的 kind（用来区分「主动停」和「意外退出」）
-        self._stopping: set[str] = set()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -148,9 +182,11 @@ class DeviceHubPage(QWidget):
         outer.addWidget(title)
 
         subtitle = QLabel(
-            "Pick an instrument below. Each one opens in its own window, and "
-            "every device GUI can also be started on its own from a terminal — "
-            "the command is shown on each card.")
+            "Pick an instrument below. Each one opens in its own window and "
+            "keeps running when this launcher is closed — close that window "
+            "to stop the device, so it can halt and release the hardware "
+            "properly. Every device can also be started on its own from a "
+            "terminal; the command is on each card.")
         subtitle.setObjectName("pageSubtitle")
         subtitle.setWordWrap(True)
         outer.addWidget(subtitle)
@@ -160,7 +196,6 @@ class DeviceHubPage(QWidget):
         for index, app in enumerate(DEVICE_APPS.values()):
             card = DeviceCard(app)
             card.launch_requested.connect(self.launch)
-            card.stop_requested.connect(self.stop)
             grid.addWidget(card, index // 2, index % 2)
             self._cards[app.key] = card
         outer.addLayout(grid)
@@ -170,124 +205,91 @@ class DeviceHubPage(QWidget):
         self.summary_label = QLabel("No device windows running.")
         self.summary_label.setObjectName("pageSubtitle")
         foot.addWidget(self.summary_label, 1)
-
-        self.stop_all_btn = QPushButton("Stop all")
-        self.stop_all_btn.setObjectName("ghost")
-        self.stop_all_btn.setEnabled(False)
-        self.stop_all_btn.clicked.connect(self.stop_all)
-        foot.addWidget(self.stop_all_btn)
         outer.addLayout(foot)
 
         outer.addStretch(1)
 
+        # 定时检查 PID：设备窗口被关掉后卡片要自己恢复成 Not running
+        self._timer = QTimer(self)
+        self._timer.setInterval(POLL_MS)
+        self._timer.timeout.connect(self._poll_states)
+        self._timer.start()
+
     # ------------------------------------------------------------------
-    # 启动 / 停止
+    # 启动
     # ------------------------------------------------------------------
     def launch(self, kind: str) -> None:
-        """用子进程启动一个设备 GUI。"""
-        if kind in self._procs:
+        """用**脱离的**子进程启动设备 GUI。
+
+        用 startDetached 而不是 QProcess.start()：QProcess 是 QObject，
+        主窗口销毁时它也会被销毁，而 QProcess 析构时会杀掉仍在运行的子
+        进程 —— 那等于在退出路径上偷偷 terminate，正是要避免的行为。
+        """
+        if kind in self._pids:
             return
         app = DEVICE_APPS.get(kind)
         if app is None:
             return
 
-        proc = QProcess(self)
-        proc.setProgram(sys.executable)
-        proc.setArguments(["-m", app.module])
-        proc.setWorkingDirectory(str(ROOT))
+        try:
+            ok, pid = QProcess.startDetached(
+                sys.executable, ["-m", app.module], str(ROOT))
+        except Exception as exc:                     # noqa: BLE001
+            self._cards[kind].set_state(EXITED, f"— {exc}")
+            return
 
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("QT_API", "pyside6")
-        proc.setProcessEnvironment(env)
+        if not ok:
+            self._cards[kind].set_state(
+                EXITED, "— could not start; run the command on the card to see why")
+            return
 
-        proc.started.connect(lambda k=kind: self._on_started(k))
-        proc.errorOccurred.connect(lambda err, k=kind: self._on_error(k, err))
-        proc.finished.connect(
-            lambda code, status, k=kind: self._on_finished(k, code, status))
-
-        self._procs[kind] = proc
-        self._cards[kind].set_state(STARTING)
+        self._pids[kind] = int(pid)
+        self._cards[kind].set_state(RUNNING, f"(pid {pid})")
         self._refresh_summary()
-        proc.start()
 
-    def stop(self, kind: str) -> None:
-        """请求子进程退出；不响应则强杀。"""
-        proc = self._procs.get(kind)
-        if proc is None:
-            return
-        if proc.state() == QProcess.ProcessState.NotRunning:
-            self._on_finished(kind, proc.exitCode(), proc.exitStatus())
-            return
-        self._stopping.add(kind)
-        proc.terminate()
-        if not proc.waitForFinished(2500):
-            proc.kill()
-            proc.waitForFinished(1500)
-
-    def stop_all(self) -> None:
-        for kind in list(self._procs):
-            self.stop(kind)
+        # 有些失败是"python 起来了但模块不存在"，进程会很快退出。
+        # 稍等一下再看一眼，别把这种情况显示成 Running。
+        QTimer.singleShot(FIRST_CHECK_MS, self._poll_states)
 
     # ------------------------------------------------------------------
-    def _on_started(self, kind: str) -> None:
-        proc = self._procs.get(kind)
-        pid = int(proc.processId()) if proc is not None else 0
-        self._cards[kind].set_state(RUNNING, f"(pid {pid})" if pid else "")
-        self._refresh_summary()
-
-    def _on_error(self, kind: str, error) -> None:
-        card = self._cards.get(kind)
-        if card is None:
-            return
-        if error == QProcess.ProcessError.FailedToStart:
-            card.set_state(EXITED, "— failed to start")
-            self._procs.pop(kind, None)
+    # 状态
+    # ------------------------------------------------------------------
+    def _poll_states(self) -> None:
+        changed = False
+        for kind, pid in list(self._pids.items()):
+            if pid_alive(pid):
+                continue
+            self._pids.pop(kind, None)
+            card = self._cards.get(kind)
+            if card is not None:
+                card.set_state(
+                    EXITED,
+                    "— window closed" if card._state == RUNNING
+                    else "— exited quickly (run the command to see why)")
+            changed = True
+        if changed:
             self._refresh_summary()
 
-    def _on_finished(self, kind: str, code: int, _status) -> None:
-        self._procs.pop(kind, None)
-        stopped_by_us = kind in self._stopping
-        self._stopping.discard(kind)
-        card = self._cards.get(kind)
-        if card is not None:
-            if stopped_by_us:
-                card.set_state(EXITED, "— stopped")
-            elif code:
-                card.set_state(EXITED, f"— exit code {code}")
-            else:
-                card.set_state(EXITED)
-        self._refresh_summary()
-
     def _refresh_summary(self) -> None:
-        running = len([p for p in self._procs.values()
-                       if p.state() != QProcess.ProcessState.NotRunning])
+        running = len(self._pids)
         if running:
-            self.summary_label.setText(f"{running} device window(s) running.")
-            self.stop_all_btn.setEnabled(True)
+            self.summary_label.setText(
+                f"{running} device window(s) running — they stay open "
+                "independently of this launcher.")
         else:
             self.summary_label.setText("No device windows running.")
-            self.stop_all_btn.setEnabled(False)
 
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
-        """主窗口关闭时，结束所有由本页启动的设备窗口。
+        """主窗口关闭时：**不**结束设备窗口。
 
-        这些窗口本身是独立进程，不主动收掉会变成孤儿。想让它继续跑的话
-        可以在终端里单独启动 —— 那条路不经过这里。
+        设备 GUI 是独立进程，它的生命周期由那个窗口决定。从入口强行
+        终止会绕过它的 closeEvent（Linux 上 SIGTERM 直接杀进程），
+        设备就没机会 halt / 归零 —— 那比留着窗口危险得多。
 
-        注意：先对**所有**子进程发 terminate，再统一等待。逐个 stop() 串行
-        等待的话，6 个设备最坏要等十几秒，关窗口会明显卡住。
+        这个页面关闭时只停掉自己的轮询定时器。
         """
-        procs = list(self._procs.values())
-        for kind in list(self._procs):
-            self._stopping.add(kind)
-            proc = self._procs[kind]
-            if proc.state() != QProcess.ProcessState.NotRunning:
-                proc.terminate()
-
-        for proc in procs:
-            if proc.state() == QProcess.ProcessState.NotRunning:
-                continue
-            if not proc.waitForFinished(1500):
-                proc.kill()
-                proc.waitForFinished(700)
+        try:
+            self._timer.stop()
+        except Exception:                            # noqa: BLE001
+            pass

@@ -28,6 +28,7 @@ MODULES = [
     ("core/stage.py", "ASI LX-4000 位移台驱动"),
     ("core/nidaq.py", "NI-DAQ 模拟输出（Stage 页面不直接用，但设备注册表引用它）"),
     ("core/devices.py", "设备注册表"),
+    ("ui/theme.py", "全局样式表（否则危险按钮没有样式）"),
     ("ui/workers.py", "后台任务"),
     ("ui/widgets/device_selector.py", "设备选择 + 连接组件"),
     ("ui/pages/stage_page.py", "Stage Controller 页面"),
@@ -103,6 +104,7 @@ def main() -> int:
     window = StagePage()
     window.setWindowTitle("Stage Controller — Personal Research")
     window.resize(1120, 840)
+    apply_theme(window)
     window.show()
     return app.exec()
 

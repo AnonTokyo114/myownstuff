@@ -31,6 +31,7 @@ from typing import Callable
 from dataclasses import dataclass
 import sys
 
+from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -852,15 +853,19 @@ class ASI_lx_4000:
     # ------------------------------------------------------------------
     # 运动 / 位置
     # ------------------------------------------------------------------
-    def wait_movement(self, timeout: float = 120.0, poll: float = 0.3) -> None:
+    def wait_movement(self, timeout: float = 120.0, poll: float = 0.3,
+                      honour_abort: bool = True) -> None:
         """等待 STATUS 变成 'N'（空闲）。回复异常或超时会抛错。
 
-        若期间按了 HALT，会立刻抛 ASIHalted，不必等到超时。
+        honour_abort=True（默认）用于运动流程：HALT 后立刻抛 ASIHalted，
+        不必等到超时。
+        honour_abort=False 用于**只读**操作：HALT 之后仍然要能读当前位置，
+        读位置既不该重启被取消的流程，也不该被它挡住。
         """
         deadline = time.monotonic() + timeout
         time.sleep(0.3)
         while time.monotonic() < deadline:
-            if self._abort.is_set():
+            if honour_abort and self._abort.is_set():
                 raise ASIHalted("Motion was cancelled by HALT.")
             status = self.query("STATUS")
             token = status.replace(":A", "").strip()[:1]
@@ -907,13 +912,13 @@ class ASI_lx_4000:
         return self._read_pos(axis)
 
     def get_x_pos(self) -> float:
-        """当前 X 位置（0.1 µm）。"""
-        self.wait_movement()
+        """当前 X 位置（0.1 µm）。只读，不受 HALT 影响。"""
+        self.wait_movement(honour_abort=False)
         return self._read_pos("X")
 
     def get_y_pos(self) -> float:
-        """当前 Y 位置（0.1 µm）。"""
-        self.wait_movement()
+        """当前 Y 位置（0.1 µm）。只读，不受 HALT 影响。"""
+        self.wait_movement(honour_abort=False)
         return self._read_pos("Y")
 
     def go_x_pos(self, input_pos: float) -> float:
@@ -1276,8 +1281,16 @@ class NIDaqDevice:
                         f"WARNING: could NOT set 0 V — the output may still be "
                         f"live ({exc})")
                 self._close_task()
+            elif self.last_applied is None:
+                # task 已经没了，但上一次归零**失败**过 —— 端子状态仍然未知。
+                # 「task 已释放」不等于「输出为 0 V」，不能据此报成功。
+                zeroed = False
+                error = ("unknown output state from an earlier failed zeroing; "
+                         "the DAQ task is gone, so it cannot be re-driven here")
+                self._log("WARNING: output state still UNKNOWN from an earlier "
+                          "failed zeroing")
             else:
-                # 本来就没有 task 在跑，可以认为端子上没有本程序施加的输出
+                # 从未写过非零值（或上次已成功归零），可以认为端子上没有输出
                 zeroed = True
             released = self._task is None
 
@@ -1285,6 +1298,7 @@ class NIDaqDevice:
             self.last_applied = 0.0
             self.warned = False
         else:
+            # 保持未知，直到有一次**成功的硬件写零**为止
             self.last_applied = None
         return StopResult(zeroed=zeroed, released=released, error=error)
 
@@ -1579,6 +1593,304 @@ def find_spec(kind: str, key: str) -> DeviceSpec | None:
         if spec.key == key:
             return spec
     return None
+
+
+# ====================================================================
+#  全局样式表（否则危险按钮没有样式）   （源：ui/theme.py）
+# ====================================================================
+from PySide6.QtWidgets import QWidget
+
+#: 整个应用的样式表
+STYLESHEET = """\
+
+            QWidget {
+                font-size: 13px;
+                color: #1f2328;
+            }
+            #sidebar {
+                background: #f7f8fa;
+                border-right: 1px solid #e3e6ea;
+            }
+            #nav {
+                background: transparent;
+                outline: 0;
+                border: 0;
+            }
+            #nav::item {
+                border-radius: 6px;
+                padding-left: 2px;
+                color: #3a424d;
+            }
+            #nav::item:selected {
+                background: #e4edfb;
+                color: #1b4fa8;
+                font-weight: 600;
+            }
+            #nav::item:hover:!selected {
+                background: #eef1f5;
+            }
+            /* 这里刻意不写 ::branch 规则：
+               一旦设 background 或 image，Qt 就不再画默认的展开箭头了。 */
+            #hint {
+                color: #9aa3ae;
+                font-size: 11px;
+            }
+            #pageTitle {
+                font-size: 21px;
+                font-weight: 700;
+                color: #14181d;
+            }
+            #pageSubtitle {
+                color: #6b7480;
+                font-size: 12px;
+            }
+            #fieldLabel {
+                color: #47505b;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #formBox {
+                background: #f7f8fa;
+                border: 1px solid #e3e6ea;
+                border-radius: 8px;
+            }
+            #latexBox {
+                background: #ffffff;
+                border: 1px solid #e3e6ea;
+                border-radius: 8px;
+            }
+            #codeField, #matrixResult {
+                font-family: Consolas, "Cascadia Mono", monospace;
+                background: #f2f4f7;
+                border: 1px solid #e3e6ea;
+                border-radius: 5px;
+                padding: 4px 6px;
+                color: #2b3138;
+            }
+            #matrixResult {
+                font-size: 15px;
+                background: #ffffff;
+                border: 0;
+            }
+            #numericBox {
+                font-family: Consolas, "Cascadia Mono", monospace;
+                background: #fbfcfd;
+                border: 1px solid #e3e6ea;
+                border-radius: 6px;
+                color: #2b3138;
+            }
+            #mirrorish {
+                color: #33404d;
+                background: #f2f6fb;
+                border: 1px solid #dde6f2;
+                border-radius: 6px;
+                padding: 7px 9px;
+                font-size: 12px;
+            }
+            #exprField, #codeInput {
+                font-family: Consolas, "Cascadia Mono", monospace;
+            }
+            /* ---------- 首页 ---------- */
+            #homeTitle {
+                font-size: 30px;
+                font-weight: 700;
+                color: #12202f;
+            }
+            #homeSubtitle {
+                font-size: 13px;
+                color: #6b7480;
+            }
+            #homeFooter {
+                font-size: 11px;
+                color: #9aa3ae;
+            }
+            /* ---------- 卡片 ---------- */
+            #navCard, #planCard {
+                background: #ffffff;
+                border: 1px solid #e3e6ea;
+                border-radius: 10px;
+            }
+            #navCard[hovered="true"] {
+                background: #f4f8fe;
+                border: 1px solid #9dbfe8;
+            }
+            #cardTitle {
+                font-size: 14px;
+                font-weight: 600;
+                color: #1b3a5c;
+            }
+            #cardDesc {
+                font-size: 11px;
+                color: #6b7480;
+            }
+            /* ---------- 提示框 ---------- */
+            #noticeBox {
+                background: #fff8e6;
+                border: 1px solid #f0dfae;
+                border-radius: 8px;
+            }
+            #noticeTitle {
+                font-size: 13px;
+                font-weight: 600;
+                color: #7a5a12;
+            }
+            #noticeBody {
+                font-size: 12px;
+                color: #6d5a2c;
+            }
+            /* ---------- Device Interface 入口卡片 ---------- */
+            #hubIcon {
+                font-size: 17px;
+                color: #2b5ea8;
+            }
+            #hubTitle {
+                font-size: 14px;
+                font-weight: 600;
+                color: #1b1f24;
+            }
+            #hubTag {
+                font-size: 10px;
+                color: #8a6d1f;
+                background: #fdf6e3;
+                border: 1px solid #efe0b8;
+                border-radius: 8px;
+                padding: 1px 7px;
+            }
+            #hubCommand {
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 11px;
+                color: #5b6470;
+                background: #f4f6f9;
+                border: 1px solid #e3e6ea;
+                border-radius: 5px;
+                padding: 3px 7px;
+            }
+            /* ---------- 安全警示横幅 ---------- */
+            #dangerBanner {
+                background: #fdecea;
+                border: 1px solid #f3b8b2;
+                border-radius: 8px;
+            }
+            #dangerBannerIcon {
+                font-size: 20px;
+                color: #b3261e;
+            }
+            #dangerBannerText {
+                font-size: 12px;
+                color: #7a1c16;
+                font-weight: 500;
+            }
+            /* ---------- 通用控件 ---------- */
+            QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
+                background: #ffffff;
+                border: 1px solid #d5dae1;
+                border-radius: 5px;
+                padding: 4px 6px;
+                selection-background-color: #cfe0fb;
+            }
+            QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+                border: 1px solid #4c86d6;
+            }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #d5dae1;
+                border-radius: 6px;
+                padding: 5px 12px;
+                color: #2b3138;
+            }
+            QPushButton:hover {
+                background: #f2f5f9;
+            }
+            QPushButton#primary {
+                background: #2f6fb0;
+                border: 1px solid #2f6fb0;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton#primary:hover {
+                background: #2a63a0;
+            }
+            QPushButton#ghost {
+                background: transparent;
+                border: 1px solid #d5dae1;
+                color: #47505b;
+            }
+            QPushButton#ghost:hover {
+                background: #f2f5f9;
+            }
+            QPushButton#danger {
+                background: #b3261e;
+                border: 1px solid #b3261e;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            QPushButton#danger:hover {
+                background: #9a2019;
+            }
+            QPushButton#danger:disabled {
+                background: #e6c9c6;
+                border: 1px solid #e6c9c6;
+                color: #ffffff;
+            }
+            #monoBig {
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 19px;
+                font-weight: 600;
+                color: #12202f;
+            }
+            QTableWidget {
+                background: #ffffff;
+                border: 1px solid #e3e6ea;
+                border-radius: 6px;
+                gridline-color: #eef1f5;
+                selection-background-color: #dce9fa;
+                selection-color: #14181d;
+            }
+            QHeaderView::section {
+                background: #f4f6f9;
+                border: 0;
+                border-bottom: 1px solid #e3e6ea;
+                padding: 5px 6px;
+                color: #47505b;
+                font-weight: 600;
+            }
+            QTabWidget::pane {
+                border: 1px solid #e3e6ea;
+                border-radius: 8px;
+                background: #ffffff;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: transparent;
+                padding: 7px 18px;
+                margin-right: 2px;
+                color: #5b6470;
+                border: 1px solid transparent;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                border: 1px solid #e3e6ea;
+                border-bottom-color: #ffffff;
+                color: #1b4fa8;
+                font-weight: 600;
+            }
+            QTabBar::tab:hover:!selected {
+                color: #2b3138;
+            }
+            QStatusBar {
+                color: #5b6470;
+            }
+            QSplitter::handle {
+                background: #e3e6ea;
+            }
+            """
+
+
+def apply_theme(widget: QWidget) -> None:
+    """把统一样式应用到某个窗口（主窗口或独立设备窗口）。"""
+    widget.setStyleSheet(STYLESHEET)
 
 
 # ====================================================================
@@ -2885,6 +3197,7 @@ def main() -> int:
     window = StagePage()
     window.setWindowTitle("Stage Controller — Personal Research")
     window.resize(1120, 840)
+    apply_theme(window)
     window.show()
     return app.exec()
 
