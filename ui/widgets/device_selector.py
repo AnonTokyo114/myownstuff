@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from core import devices as dev_mod
 from core import transport as tr_mod
+from ui.settings import settings
 from ui.workers import run_async
 
 #: 连接方式 -> 显示名
@@ -401,13 +402,9 @@ class DeviceSelector(QFrame):
         #: 外部（页面）正在执行耗时操作时置位，锁住连接控件
         self._locked = False
 
-        #: 每种连接方式的最后一次配置，切换型号时保留
-        self._configs: dict[str, dict] = {
-            "serial": {"port": "COM6", "baudrate": 115200},
-            "lan": {"host": "192.168.1.100", "port": 5025},
-            "gpib": {"address": "GPIB0::12::INSTR"},
-            "local": {"resource": "Dev1"},
-        }
+        #: 每种连接方式的最后一次配置，切换型号时保留。
+        #: 初值从 settings.ini 读，所以改过一次端口之后就不用每次再选。
+        self._configs: dict[str, dict] = self._load_configs()
         #: 当前使用的连接方式
         self._conn_kind = "serial"
 
@@ -559,8 +556,55 @@ class DeviceSelector(QFrame):
         kind, params = dialog.result_config()
         self._conn_kind = kind
         self._configs[kind] = params
+        self._save_configs()          # 记住这次的选择，下次打开就是这个
         self._refresh_conn_button()
         self.log.emit("Connection set to " + dialog.summary())
+
+    # ==================================================================
+    # 配置持久化
+    # ==================================================================
+    #: 各类连接方式的出厂默认值（settings.ini 里没有时用它）
+    DEFAULT_CONFIGS = {
+        "serial": {"port": "COM6", "baudrate": 115200},
+        "lan": {"host": "192.168.1.100", "port": 5025},
+        "gpib": {"address": "GPIB0::12::INSTR"},
+        "local": {"resource": "Dev1"},
+    }
+
+    def _load_configs(self) -> dict[str, dict]:
+        """从 settings.ini 读这个设备的连接参数。
+
+        每个设备（按 kind 分组）各自记住自己的串口，所以 Stage 用 COM7、
+        滤光片轮用 COM4 互不影响。
+        """
+        configs = {k: dict(v) for k, v in self.DEFAULT_CONFIGS.items()}
+        store = settings()
+        store.beginGroup(self._kind)
+        for transport, conf in configs.items():
+            store.beginGroup(transport)
+            for key in list(conf):
+                if not store.contains(key):
+                    continue
+                raw = store.value(key)
+                try:
+                    conf[key] = type(conf[key])(raw)
+                except (TypeError, ValueError):
+                    pass          # 文件被手改坏了就退回默认值
+            store.endGroup()
+        store.endGroup()
+        return configs
+
+    def _save_configs(self) -> None:
+        """把当前连接参数写回 settings.ini。"""
+        store = settings()
+        store.beginGroup(self._kind)
+        for transport, conf in self._configs.items():
+            store.beginGroup(transport)
+            for key, value in conf.items():
+                store.setValue(key, value)
+            store.endGroup()
+        store.endGroup()
+        store.sync()
 
     # ==================================================================
     # 连接 / 断开

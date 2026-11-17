@@ -143,6 +143,39 @@ git clone https://github.com/<你的用户名>/research-gui.git
 
 - `.git` 目录也在 OneDrive 里会同步，但它只有 150 KB 左右，无所谓。
 
+## 改 COM 端口
+
+**推荐：在界面上改，改一次就记住**
+
+1. 打开设备窗口（Stage Controller / Filter Wheel …）
+2. 点 **Connection** 按钮
+3. 在 **Port** 下拉里选实际端口 —— 扫描不到时下拉框可以直接输入，例如 `COM7`
+4. OK → **Connect**
+
+之后每次打开都直接用这个端口，不用再选。配置存在项目根的 `settings.ini`：
+
+```ini
+[stage]
+serial\port=COM7
+serial\baudrate=115200
+
+[filterwheel]
+serial\port=COM4
+serial\baudrate=115200
+```
+
+**各设备分开记**，所以位移台用 COM7、滤光片轮用 COM4 互不干扰。
+
+### 其它改法
+
+| 目的 | 做法 |
+|---|---|
+| 直接改配置 | 编辑 `settings.ini` 里对应的 `serial\port=` |
+| 恢复默认（COM6） | 删掉 `settings.ini`（或删掉对应的段） |
+| 改出厂默认值 | `ui/widgets/device_selector.py` 的 `DEFAULT_CONFIGS` |
+
+`settings.ini` 在 `.gitignore` 里 —— 每台机器的串口不一样，不该进仓库。
+
 ## 跑测试
 
 ```

@@ -16,3 +16,6 @@ wheels/
 # 编辑器/系统
 .DS_Store
 Thumbs.db
+
+# 用户配置（每台机器的端口不同，不该进仓库）
+settings.ini
