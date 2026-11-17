@@ -310,8 +310,9 @@ class DerivativeTab(_BaseTab):
         self.expr = _expr_field("e.g.  sin(x)*x   or  exp(-x^2)")
         self.var = _var_field("x")
         self.assume = _assumption_combo()
-        self.point = QLineEdit("1")
-        self.point.setPlaceholderText("value of x to evaluate at")
+        self.point = QLineEdit("")
+        self.point.setMinimumWidth(240)
+        self.point.setPlaceholderText("leave empty = expression only")
         self.order = QSpinBox()
         self.order.setRange(1, 2)
         self.order.setValue(1)
@@ -331,7 +332,7 @@ class DerivativeTab(_BaseTab):
         pt_row.addWidget(QLabel("Order"))
         pt_row.addWidget(self.order)
         pt_row.addStretch(1)
-        self.form.addRow("Evaluate at", _wrap(pt_row))
+        self.form.addRow("Evaluate at (optional)", _wrap(pt_row))
 
     def compute(self) -> None:
         expr = self.expr.text().strip()
@@ -339,26 +340,50 @@ class DerivativeTab(_BaseTab):
             self.result.show_result(error="Please enter a function first")
             return
         var = self.var.text().strip() or "x"
-        try:
-            x0 = float(self.point.text().strip())
-        except ValueError:
-            self.result.show_result(error="The evaluation point must be a number")
-            return
-
+        order = self.order.value()
         assumptions = _assumptions_for(self.assume, [var])
-        try:
-            order = self.order.value()
-            # 直接对原式求 order 阶导，不把一阶结果重新解析一遍
-            txt, latex = cs.differentiate(expr, var, order=order,
-                                          assumptions=assumptions)
-            value, err = cn.derivative(expr, x0, order=order, x_name=var)
 
-            lines = [f"{'second' if order == 2 else 'first'} derivative at {var} = {x0}: {value}",
-                     f"Error estimate: ±{err:.3e}",
-                     f"Derivative: {txt}"]
-            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
-        except Exception as exc:
-            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+        # 求值点是可选的：留空就只给符号表达式
+        point_text = self.point.text().strip()
+        x0 = None
+        if point_text:
+            try:
+                x0 = float(point_text)
+            except ValueError:
+                self.result.show_result(
+                    error="The evaluation point must be a number "
+                          "(leave it empty to get the expression only)")
+                return
+
+        lines: list[str] = []
+        symbolic_text = symbolic_latex = None
+        numeric_ok = False
+
+        # 数值结果（只有填了求值点才算）
+        if x0 is not None:
+            try:
+                value, err = cn.derivative(expr, x0, order=order, x_name=var)
+                lines.append(
+                    f"{'second' if order == 2 else 'first'} derivative at "
+                    f"{var} = {x0}: {value}")
+                lines.append(f"Error estimate: ±{err:.3e}")
+                numeric_ok = True
+            except Exception as exc:                 # noqa: BLE001
+                lines.append(f"Numeric failed: {type(exc).__name__}: {exc}")
+
+        # 符号结果（总是尝试）
+        try:
+            symbolic_text, symbolic_latex = cs.differentiate(
+                expr, var, order=order, assumptions=assumptions)
+            lines.append(f"Derivative: {symbolic_text}")
+        except Exception as exc:                     # noqa: BLE001
+            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+
+        if symbolic_text is None and not numeric_ok:
+            self.result.show_result(error="\n".join(lines))
+            return
+        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
+                                numeric="\n".join(lines))
 
 
 # ====================================================================== 偏导
@@ -369,8 +394,9 @@ class PartialTab(_BaseTab):
         self.vars = QLineEdit("x, y")
         self.vars.setPlaceholderText("comma-separated variable names")
         self.assume = _assumption_combo()
-        self.point = QLineEdit("x=1, y=2")
-        self.point.setPlaceholderText("x=1, y=2")
+        self.point = QLineEdit("")
+        self.point.setMinimumWidth(240)
+        self.point.setPlaceholderText("x=1, y=2 — or leave empty")
         self.which = QLineEdit("x")
         self.which.setFixedWidth(70)
         self.order = QSpinBox()
@@ -394,7 +420,7 @@ class PartialTab(_BaseTab):
         p_row.addWidget(QLabel(", order"))
         p_row.addWidget(self.order)
         p_row.addStretch(1)
-        self.form.addRow("Evaluate at", _wrap(p_row))
+        self.form.addRow("Evaluate at (optional)", _wrap(p_row))
 
     def compute(self) -> None:
         expr = self.expr.text().strip()
@@ -410,33 +436,63 @@ class PartialTab(_BaseTab):
             self.result.show_result(error=f"Differentiation variable {var} is not in the variable list")
             return
 
+        # 求值点是可选的：留空就只给符号表达式
         point: dict[str, float] = {}
-        for piece in self.point.text().split(","):
-            piece = piece.strip()
-            if not piece:
-                continue
-            if "=" not in piece:
-                self.result.show_result(error=f"Evaluation point \"{piece}\" should be written as name=value")
-                return
-            name, _, value = piece.partition("=")
-            try:
-                point[name.strip()] = float(value.strip())
-            except ValueError:
-                self.result.show_result(error=f"\"{value.strip()}\" is not a number")
-                return
+        raw_point = self.point.text().strip()
+        if raw_point:
+            for piece in raw_point.split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if "=" not in piece:
+                    self.result.show_result(
+                        error=f"Evaluation point \"{piece}\" should be written "
+                              f"as name=value (or leave the field empty)")
+                    return
+                name, _, value = piece.partition("=")
+                try:
+                    point[name.strip()] = float(value.strip())
+                except ValueError:
+                    self.result.show_result(error=f"\"{value.strip()}\" is not a number")
+                    return
 
+        order = self.order.value()
+        assume = _assumptions_for(self.assume, variables)
+
+        lines: list[str] = []
+        symbolic_text = symbolic_latex = None
+        numeric_ok = False
+
+        # 数值结果：只有在给出**完整**求值点时才计算
+        if point:
+            missing = [v for v in variables if v not in point]
+            if missing:
+                lines.append("Numeric skipped — no value given for "
+                             + ", ".join(missing))
+            else:
+                try:
+                    value, err = cn.partial_derivative(
+                        expr, variables, point, var, order=order)
+                    lines.append(f"∂/∂{var} at {point}: {value}")
+                    lines.append(f"Error estimate: ±{err:.3e}")
+                    numeric_ok = True
+                except Exception as exc:             # noqa: BLE001
+                    lines.append(
+                        f"Numeric failed: {type(exc).__name__}: {exc}")
+
+        # 符号结果：总是尝试
         try:
-            assume = _assumptions_for(self.assume, variables)
-            txt, latex = cs.partial(expr, variables, var,
-                                    order=self.order.value(), assumptions=assume)
-            value, err = cn.partial_derivative(expr, variables, point, var,
-                                               order=self.order.value())
-            lines = [f"∂/∂{var} at {point}: {value}",
-                     f"Error estimate: ±{err:.3e}",
-                     f"Partial derivative: {txt}"]
-            self.result.show_result(latex=latex, text=txt, numeric="\n".join(lines))
-        except Exception as exc:
-            self.result.show_result(error=f"{type(exc).__name__}: {exc}")
+            symbolic_text, symbolic_latex = cs.partial(
+                expr, variables, var, order=order, assumptions=assume)
+            lines.append(f"Partial derivative: {symbolic_text}")
+        except Exception as exc:                     # noqa: BLE001
+            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+
+        if symbolic_text is None and not numeric_ok:
+            self.result.show_result(error="\n".join(lines))
+            return
+        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
+                                numeric="\n".join(lines))
 
 
 # ====================================================================== 页面
