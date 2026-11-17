@@ -15,6 +15,12 @@
     close() 全都没机会执行。位移台可能还在动，DAQ 可能还带着电压。
     与其给一个看起来能停、实际绕过安全清理的按钮，不如让用户去关那个
     设备窗口本身（那条路径会走完整的清理流程）。
+
+关于「收纳类」入口：
+
+    有些设备不值得单独占一张卡片（例如滤光片轮）。它们在
+    ``DEVICE_APPS`` 里被登记成某个入口的 ``members``，那张卡片上就会
+    多一个下拉，选好再 Launch。设备本身仍然能独立运行。
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import sys
 
 from PySide6.QtCore import QProcess, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -33,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from devicegui.base import DEVICE_APPS, ROOT, DeviceApp
+from devicegui.base import DEVICE_APPS, ROOT, DeviceApp, top_level_apps
 
 #: 卡片状态
 IDLE = "idle"
@@ -42,7 +49,7 @@ EXITED = "exited"
 
 #: 多久检查一次子进程是否还活着（毫秒）
 POLL_MS = 2000
-#: 启动后多久做第一次存活检查（太短会把还在初始化的进程误判成已退出）
+#: 启动后多久做第一次存活检查
 FIRST_CHECK_MS = 2500
 
 
@@ -75,7 +82,11 @@ def pid_alive(pid: int) -> bool:
 
 
 class DeviceCard(QFrame):
-    """一个设备入口卡片：图标/标题、说明、运行状态、启动按钮。"""
+    """一个设备入口卡片。
+
+    ``app.members`` 非空时（收纳类入口，如 Others），卡片上会多一个
+    下拉用来挑具体启动哪个成员。
+    """
 
     launch_requested = Signal(str)
 
@@ -101,7 +112,7 @@ class DeviceCard(QFrame):
         head.addWidget(title)
         head.addStretch(1)
 
-        if not app.implemented:
+        if not app.implemented and not app.members:
             tag = QLabel("placeholder")
             tag.setObjectName("hubTag")
             head.addWidget(tag)
@@ -112,11 +123,31 @@ class DeviceCard(QFrame):
         summary.setWordWrap(True)
         layout.addWidget(summary)
 
-        cmd = QLabel(f"python -m {app.module}")
-        cmd.setObjectName("hubCommand")
-        cmd.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        cmd.setToolTip("Run this in a terminal to start the device on its own")
-        layout.addWidget(cmd)
+        # ---- 成员下拉（只有收纳类入口才有）----
+        self.member_box: QComboBox | None = None
+        if app.members:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            row.addWidget(QLabel("Device:"))
+            self.member_box = QComboBox()
+            for key in app.members:
+                member = DEVICE_APPS.get(key)
+                if member is not None:
+                    self.member_box.addItem(member.title, key)
+            self.member_box.setMinimumWidth(240)
+            self.member_box.currentIndexChanged.connect(
+                self._on_member_changed)
+            row.addWidget(self.member_box, 1)
+            layout.addLayout(row)
+
+        self.cmd_label = QLabel("")
+        self.cmd_label.setObjectName("hubCommand")
+        self.cmd_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.cmd_label.setToolTip(
+            "Run this in a terminal to start the device on its own")
+        layout.addWidget(self.cmd_label)
+        self._refresh_command()
 
         foot = QHBoxLayout()
         foot.setSpacing(8)
@@ -127,13 +158,35 @@ class DeviceCard(QFrame):
         self.action_btn = QPushButton("Launch")
         self.action_btn.setObjectName("primary")
         self.action_btn.setFixedWidth(110)
-        self.action_btn.clicked.connect(
-            lambda: self.launch_requested.emit(self.app.key))
+        self.action_btn.clicked.connect(self._emit_launch)
         foot.addWidget(self.action_btn)
         layout.addLayout(foot)
 
         self._apply_state(IDLE)
 
+    # ------------------------------------------------------------------
+    def current_key(self) -> str:
+        """这张卡片当前指向的设备 key（收纳类入口看下拉）。"""
+        if self.member_box is not None:
+            data = self.member_box.currentData()
+            if data:
+                return str(data)
+        return self.app.key
+
+    def _refresh_command(self) -> None:
+        key = self.current_key()
+        app = DEVICE_APPS.get(key) or self.app
+        self.cmd_label.setText(f"python -m {app.module}")
+
+    def _on_member_changed(self, _index: int) -> None:
+        self._refresh_command()
+        # 换了设备，先回到"未运行"，接着由轮询刷新真实状态
+        self._apply_state(IDLE)
+
+    def _emit_launch(self) -> None:
+        self.launch_requested.emit(self.current_key())
+
+    # ------------------------------------------------------------------
     def _apply_state(self, state: str, detail: str = "") -> None:
         self._state = state
         colors = {
@@ -193,7 +246,7 @@ class DeviceHubPage(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(10)
-        for index, app in enumerate(DEVICE_APPS.values()):
+        for index, app in enumerate(top_level_apps()):
             card = DeviceCard(app)
             card.launch_requested.connect(self.launch)
             grid.addWidget(card, index // 2, index % 2)
@@ -209,25 +262,30 @@ class DeviceHubPage(QWidget):
 
         outer.addStretch(1)
 
-        # 定时检查 PID：设备窗口被关掉后卡片要自己恢复成 Not running
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self._poll_states)
         self._timer.start()
 
     # ------------------------------------------------------------------
-    # 启动
+    def _card_for(self, kind: str) -> DeviceCard | None:
+        """找到某个设备所属的卡片（收纳类入口会代管它的成员）。"""
+        card = self._cards.get(kind)
+        if card is not None:
+            return card
+        for key, card in self._cards.items():
+            app = DEVICE_APPS.get(key)
+            if app is not None and kind in app.members:
+                return card
+        return None
+
     # ------------------------------------------------------------------
     def launch(self, kind: str) -> None:
-        """用**脱离的**子进程启动设备 GUI。
-
-        用 startDetached 而不是 QProcess.start()：QProcess 是 QObject，
-        主窗口销毁时它也会被销毁，而 QProcess 析构时会杀掉仍在运行的子
-        进程 —— 那等于在退出路径上偷偷 terminate，正是要避免的行为。
-        """
+        """用**脱离的**子进程启动设备 GUI。"""
         if kind in self._pids:
             return
         app = DEVICE_APPS.get(kind)
+        card = self._card_for(kind)
         if app is None:
             return
 
@@ -235,24 +293,24 @@ class DeviceHubPage(QWidget):
             ok, pid = QProcess.startDetached(
                 sys.executable, ["-m", app.module], str(ROOT))
         except Exception as exc:                     # noqa: BLE001
-            self._cards[kind].set_state(EXITED, f"— {exc}")
+            if card is not None:
+                card.set_state(EXITED, f"— {exc}")
             return
 
         if not ok:
-            self._cards[kind].set_state(
-                EXITED, "— could not start; run the command on the card to see why")
+            if card is not None:
+                card.set_state(
+                    EXITED,
+                    "— could not start; run the command on the card to see why")
             return
 
         self._pids[kind] = int(pid)
-        self._cards[kind].set_state(RUNNING, f"(pid {pid})")
+        if card is not None:
+            card.set_state(RUNNING, f"(pid {pid})")
         self._refresh_summary()
 
-        # 有些失败是"python 起来了但模块不存在"，进程会很快退出。
-        # 稍等一下再看一眼，别把这种情况显示成 Running。
         QTimer.singleShot(FIRST_CHECK_MS, self._poll_states)
 
-    # ------------------------------------------------------------------
-    # 状态
     # ------------------------------------------------------------------
     def _poll_states(self) -> None:
         changed = False
@@ -260,7 +318,7 @@ class DeviceHubPage(QWidget):
             if pid_alive(pid):
                 continue
             self._pids.pop(kind, None)
-            card = self._cards.get(kind)
+            card = self._card_for(kind)
             if card is not None:
                 card.set_state(
                     EXITED,
@@ -286,8 +344,6 @@ class DeviceHubPage(QWidget):
         设备 GUI 是独立进程，它的生命周期由那个窗口决定。从入口强行
         终止会绕过它的 closeEvent（Linux 上 SIGTERM 直接杀进程），
         设备就没机会 halt / 归零 —— 那比留着窗口危险得多。
-
-        这个页面关闭时只停掉自己的轮询定时器。
         """
         try:
             self._timer.stop()

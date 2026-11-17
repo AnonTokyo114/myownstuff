@@ -36,6 +36,10 @@ class DeviceApp:
     module: str
     #: False 表示界面还没做好（占位），仍可启动但只是说明页
     implemented: bool = True
+    #: 收纳在这个入口下的其它设备（它们的 key）。
+    #: 有 members 的入口会在卡片上多一个下拉，Launch 启动选中的那个；
+    #: 被收纳的设备**不会**再单独占一张卡片。
+    members: tuple[str, ...] = ()
 
 
 #: 设备清单。加新设备：在 devicegui/ 下加一个 xxx_app.py，然后在这里登记。
@@ -78,22 +82,38 @@ DEVICE_APPS: dict[str, DeviceApp] = {
         summary="Analog DC voltage output via NI-DAQmx (PCI-6229 / BNC-2120).",
         module="devicegui.daq_app",
     ),
-    "filterwheel": DeviceApp(
-        key="filterwheel",
-        title="Filter Wheel",
-        icon="◍",
-        summary="Thorlabs FW102C motorized filter wheel (6 or 12 positions).",
-        module="devicegui.filterwheel_app",
-    ),
     "others": DeviceApp(
         key="others",
         title="Other instruments",
         icon="⋯",
-        summary="Room for anything that does not fit the categories above.",
+        summary="Anything that does not fit the categories above.",
         module="devicegui.others_app",
-        implemented=False,
+        # Others 是一个「收纳类」入口：卡片上会列出下面这些设备，
+        # 选一个再 Launch。它们不单独占卡片。
+        members=("filterwheel",),
+    ),
+    # 被 Others 收纳的设备：仍然要在这里登记（供启动与查找），
+    # 但 top_level_apps() 会把它过滤掉，所以界面上只出现在 Others 的下拉里。
+    "filterwheel": DeviceApp(
+        key="filterwheel",
+        title="Filter Wheel (Thorlabs FW102C)",
+        icon="◍",
+        summary="Motorized filter wheel, 6 or 12 positions.",
+        module="devicegui.filterwheel_app",
     ),
 }
+
+
+def top_level_apps() -> list[DeviceApp]:
+    """返回应该在 Device Interface 上单独占一张卡片的设备。
+
+    被某个入口收编为 ``members`` 的设备不单独出现（例如滤光片轮归在
+    Others 下面）；它仍然可以被单独启动，只是不占卡片。
+    """
+    owned: set[str] = set()
+    for app in DEVICE_APPS.values():
+        owned.update(app.members)
+    return [app for app in DEVICE_APPS.values() if app.key not in owned]
 
 
 def create_device_window(kind: str):

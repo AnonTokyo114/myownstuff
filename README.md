@@ -244,7 +244,7 @@ research-gui/
 | Device Interface | 分组节点，显示概览 |
 | └ Stage Controller | **已完成**（ASI LX-4000） |
 | └ Data Acquisition | **已完成**（NI PCI-6229 / BNC-2120） |
-| └ Filter Wheel | **已完成**（Thorlabs FW102C） |
+| └ Other instruments | **已完成**（收纳类入口，当前含滤光片轮）|
 | └ Camera / Laser / Oscilloscope / Others | **占位**，等确定仪器型号与命令集 |
 
 ## 已完成的功能页
@@ -423,9 +423,11 @@ python tools/build_stage_standalone.py
 覆盖范围：只有 Stage Controller（串口 / LAN / GPIB / 占位设备都保留）。
 主 GUI 的其它页面（Calculus、Ray Tracer 等）不在里面。
 
-### Filter Wheel
+### Filter Wheel（归在 Others 下）
 
-Thorlabs FW102C 电动滤光片轮（串口）：
+Thorlabs FW102C 电动滤光片轮（串口）。它不单独占一张卡片 —— 在 Device Interface 的 **Other instruments** 卡片里，用 **Device** 下拉选中它再 Launch。独立入口不受影响：`python -m devicegui.filterwheel_app` 或 `device.bat filterwheel` 仍然可用。
+
+功能：
 
 - **转位**：读回轮子位数（6 或 12）后，下拉里列出 1..N，选中点 Move
 - **设置**：触发模式（输入/输出）、速度（快/慢）、传感器（空闲关闭/常开）
