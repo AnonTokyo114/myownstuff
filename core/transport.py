@@ -89,6 +89,14 @@ class Transport(ABC):
     def reset_buffers(self) -> None:
         ...
 
+    def set_timeout(self, seconds: float) -> None:
+        """调整读超时（秒）。
+
+        默认实现假设子类有 ``self.timeout`` 字段；用别的单位的子类
+        （例如 GPIB 用毫秒）需要覆盖这个方法。
+        """
+        self.timeout = float(seconds)
+
     def __repr__(self) -> str:              # pragma: no cover - 调试用
         return f"<{type(self).__name__} {self.description}>"
 
@@ -191,6 +199,15 @@ class SerialTransport(Transport):
             return int(self._ser.in_waiting)
         except Exception:                            # noqa: BLE001
             return 0
+
+    def set_timeout(self, seconds: float) -> None:
+        """同时改我们记录的秒数和 pyserial 的实际读超时。"""
+        self.timeout = float(seconds)
+        if self._ser is not None:
+            try:
+                self._ser.timeout = float(seconds)
+            except Exception:                        # noqa: BLE001
+                pass
 
     def reset_buffers(self) -> None:
         if not self.is_open:
@@ -441,6 +458,15 @@ class GpibTransport(Transport):
             return int(getattr(self._res, "bytes_in_buffer", 0)) + len(self._buf)
         except Exception:                            # noqa: BLE001
             return len(self._buf)
+
+    def set_timeout(self, seconds: float) -> None:
+        """VISA 用毫秒，这里换算一下并同步到已打开的资源。"""
+        self.timeout_ms = max(1, int(float(seconds) * 1000))
+        if self._res is not None:
+            try:
+                self._res.timeout = self.timeout_ms
+            except Exception:                        # noqa: BLE001
+                pass
 
     def reset_buffers(self) -> None:
         self._buf = b""

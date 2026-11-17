@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from core import filterwheel as fw_mod
 from core import nidaq as nidaq_mod
 from core import stage as stage_mod
 from core.transport import Transport
@@ -140,6 +141,14 @@ def _make_placeholder(transport: Transport, **options):
     return PlaceholderDevice(transport, **options)
 
 
+def _make_filterwheel(transport: Transport, **options):
+    return fw_mod.ThorlabsFW102C(transport, **options)
+
+
+def _make_placeholder_fw(transport: Transport, **options):
+    return fw_mod.PlaceholderFilterWheel(transport, **options)
+
+
 def _make_nidaq(transport: Transport, **options):
     return nidaq_mod.NIDaqDevice(transport, **options)
 
@@ -196,6 +205,26 @@ DEVICES["daq"] = [
         transports=("local",),
         description="No hardware. Lets you try the output flow safely.",
         factory=_make_placeholder_daq,
+    ),
+]
+
+
+#: 滤光片轮：Thorlabs FW102C（串口）
+DEVICES["filterwheel"] = [
+    DeviceSpec(
+        key="thorlabs_fw102c",
+        name="Thorlabs FW102C",
+        transports=("serial",),
+        description="Motorized filter wheel, 6 or 12 positions. "
+                    "Moves block until the wheel reports its prompt.",
+        factory=_make_filterwheel,
+    ),
+    DeviceSpec(
+        key="placeholder",
+        name="Placeholder device",
+        transports=("serial",),
+        description="No hardware. Lets you try the move flow safely.",
+        factory=_make_placeholder_fw,
     ),
 ]
 

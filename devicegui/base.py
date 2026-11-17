@@ -78,6 +78,13 @@ DEVICE_APPS: dict[str, DeviceApp] = {
         summary="Analog DC voltage output via NI-DAQmx (PCI-6229 / BNC-2120).",
         module="devicegui.daq_app",
     ),
+    "filterwheel": DeviceApp(
+        key="filterwheel",
+        title="Filter Wheel",
+        icon="◍",
+        summary="Thorlabs FW102C motorized filter wheel (6 or 12 positions).",
+        module="devicegui.filterwheel_app",
+    ),
     "others": DeviceApp(
         key="others",
         title="Other instruments",
@@ -100,6 +107,10 @@ def create_device_window(kind: str):
     if kind == "daq":
         from ui.pages.daq_page import DaqPage
         return DaqPage()
+
+    if kind == "filterwheel":
+        from ui.pages.filterwheel_page import FilterWheelPage
+        return FilterWheelPage()
 
     from ui.pages.placeholder_page import create_device_subpage
     return create_device_subpage(kind)

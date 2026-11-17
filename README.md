@@ -23,6 +23,7 @@
 ```bat
 device.bat stage      等价于  python -m devicegui.stage_app
 device.bat daq        等价于  python -m devicegui.daq_app
+device.bat filterwheel 等价于  python -m devicegui.filterwheel_app
 ```
 
 ### 搬到另一台机器（比如实验室电脑）
@@ -184,11 +185,13 @@ research-gui/
 │   ├── transport.py         传输层：Serial / LAN / GPIB
 │   ├── devices.py           设备注册表（下拉里的型号）
 │   ├── nidaq.py             NI-DAQ 模拟输出（DC 电压）
+│   ├── filterwheel.py       Thorlabs FW102C 滤光片轮
 │   └── stage.py             ASI LX-4000 位移台
 ├── devicegui/             各设备 GUI（每个都能独立运行）
 │   ├── base.py             设备清单 + 窗口构造 + 独立运行入口
 │   ├── stage_app.py        python -m devicegui.stage_app
 │   ├── daq_app.py          python -m devicegui.daq_app
+│   ├── filterwheel_app.py  python -m devicegui.filterwheel_app
 │   ├── camera_app.py / laser_app.py / scope_app.py / others_app.py
 │   └── ...
 │
@@ -241,6 +244,7 @@ research-gui/
 | Device Interface | 分组节点，显示概览 |
 | └ Stage Controller | **已完成**（ASI LX-4000） |
 | └ Data Acquisition | **已完成**（NI PCI-6229 / BNC-2120） |
+| └ Filter Wheel | **已完成**（Thorlabs FW102C） |
 | └ Camera / Laser / Oscilloscope / Others | **占位**，等确定仪器型号与命令集 |
 
 ## 已完成的功能页
@@ -418,6 +422,19 @@ python tools/build_stage_standalone.py
 
 覆盖范围：只有 Stage Controller（串口 / LAN / GPIB / 占位设备都保留）。
 主 GUI 的其它页面（Calculus、Ray Tracer 等）不在里面。
+
+### Filter Wheel
+
+Thorlabs FW102C 电动滤光片轮（串口）：
+
+- **转位**：读回轮子位数（6 或 12）后，下拉里列出 1..N，选中点 Move
+- **设置**：触发模式（输入/输出）、速度（快/慢）、传感器（空闲关闭/常开）
+- **保存**：把当前设置存成上电默认值
+
+协议细节值得记一下：设备用 `>` 作提示符，而且 `pos=N` 会**阻塞到转位完成**
+才回提示符（最长 10 秒），所以驱动里临时把读超时调长、界面把这步放后台线程。
+
+界面上有一句常驻提醒：转位会改变光路，操作前确认激光已关或已遮挡。
 
 ### 传输层
 
