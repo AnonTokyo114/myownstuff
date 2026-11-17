@@ -49,6 +49,9 @@ class FilterWheelPage(QWidget):
         self._state: dict = {}
         #: 避免连接后自动刷新与用户操作打架
         self._loading = False
+        #: 连接会话号。每次连接/断开都 +1；后台回调对不上号就丢弃，
+        #: 避免旧设备的完成结果写到新连接的界面上。
+        self._session = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -219,6 +222,7 @@ class FilterWheelPage(QWidget):
 
     # ------------------------------------------------------------------ 连接
     def _on_connected(self, device) -> None:
+        self._session += 1
         ident = getattr(device, "identity", "")
         if ident:
             self.identity_label.setText(ident)
@@ -226,6 +230,11 @@ class FilterWheelPage(QWidget):
         self.refresh_state()
 
     def _on_disconnected(self) -> None:
+        self._session += 1
+        # 断开之后就不存在「进行中的操作」了：清掉忙状态，
+        # 否则新连接的首次状态刷新会被旧的 _busy 跳过。
+        self._busy = False
+        self.selector.set_locked(False)
         self._state = {}
         self.identity_label.setText("—")
         self.positions_label.setText("—")
@@ -239,10 +248,17 @@ class FilterWheelPage(QWidget):
         if dev is None or self._busy:
             return
 
+        session = self._session
+
         def work():
             return dev.snapshot()
 
         def done(state) -> None:
+            if session != self._session:
+                self._append_log(
+                    "State read finished after the connection changed — "
+                    "result ignored.")
+                return
             self._loading = True
             try:
                 self._state = dict(state)
@@ -261,6 +277,9 @@ class FilterWheelPage(QWidget):
             self._set_busy(False)
 
         def failed(msg: str) -> None:
+            if session != self._session:
+                self._append_log(f"State read failed after switching: {msg}")
+                return
             self._set_busy(False, f"Read state failed: {msg}")
 
         self._set_busy(True, "Reading wheel state…")
@@ -298,15 +317,26 @@ class FilterWheelPage(QWidget):
         if target is None:
             return
         target = int(target)
+        session = self._session
 
         def work():
             return dev.set_pos(target)
 
         def done(actual) -> None:
+            if session != self._session:
+                self._append_log(
+                    f"Move to {target} finished after the connection changed "
+                    "— result ignored.")
+                return
             self.position_value.setText(str(actual))
             self._set_busy(False, f"Moved to position {actual}.")
 
         def failed(msg: str) -> None:
+            if session != self._session:
+                self._append_log(
+                    f"Move to {target} failed after the connection changed: "
+                    f"{msg}")
+                return
             self._set_busy(False, f"Move failed: {msg}")
             QMessageBox.critical(self, "Move failed", msg)
 
@@ -323,6 +353,8 @@ class FilterWheelPage(QWidget):
         speed = int(self.speed_box.currentData())
         sensors = int(self.sensor_box.currentData())
 
+        session = self._session
+
         def work():
             dev.set_trig_mode(trig)
             dev.set_speed_mode(speed)
@@ -330,12 +362,21 @@ class FilterWheelPage(QWidget):
             return trig, speed, sensors
 
         def done(_result) -> None:
+            if session != self._session:
+                self._append_log(
+                    "Settings applied after the connection changed — "
+                    "result ignored.")
+                return
             self._set_busy(
                 False,
                 f"Settings applied: trigger={trig}, speed={speed}, "
                 f"sensors={sensors}.")
 
         def failed(msg: str) -> None:
+            if session != self._session:
+                self._append_log(
+                    f"Apply settings failed after switching: {msg}")
+                return
             self._set_busy(False, f"Apply settings failed: {msg}")
             QMessageBox.critical(self, "Apply settings failed", msg)
 
@@ -354,13 +395,22 @@ class FilterWheelPage(QWidget):
         if ok != QMessageBox.StandardButton.Yes:
             return
 
+        session = self._session
+
         def work():
             dev.save_settings()
 
         def done(_result) -> None:
+            if session != self._session:
+                self._append_log(
+                    "Save finished after the connection changed — ignored.")
+                return
             self._set_busy(False, "Saved as power-up defaults.")
 
         def failed(msg: str) -> None:
+            if session != self._session:
+                self._append_log(f"Save failed after switching: {msg}")
+                return
             self._set_busy(False, f"Save failed: {msg}")
             QMessageBox.critical(self, "Save failed", msg)
 
@@ -370,6 +420,9 @@ class FilterWheelPage(QWidget):
     # ------------------------------------------------------------------ 状态
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy
+        # 忙的时候锁住连接控件：中途 Disconnect 再重连，旧操作的完成
+        # 回调会把结果写到新连接的界面上（审查 #1）。
+        self.selector.set_locked(busy)
         if message:
             self._append_log(message)
         self._update_controls()

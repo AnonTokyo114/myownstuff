@@ -53,6 +53,21 @@ POLL_MS = 2000
 FIRST_CHECK_MS = 2500
 
 
+def proc_state(raw: bytes) -> str | None:
+    """从 ``/proc/<pid>/stat`` 的内容里取出进程状态字符。
+
+    格式是 ``pid (comm) state ...``。comm 是进程名，**里面可能含 ')' 和
+    空格**（例如线程名），所以不能从左往右 split，必须从右边找右括号。
+
+    解析失败返回 None，调用方按「读不到就保守地认为还活着」处理。
+    """
+    try:
+        tail = raw.rsplit(b")", 1)[1]
+        return tail.split()[0].decode("ascii", "replace")
+    except (IndexError, UnicodeDecodeError):
+        return None
+
+
 def pid_alive(pid: int) -> bool:
     """跨平台判断 PID 是否还活着。"""
     if pid <= 0:
@@ -74,11 +89,24 @@ def pid_alive(pid: int) -> bool:
         finally:
             kernel32.CloseHandle(handle)
 
+    # ---- POSIX ----
     try:
         os.kill(pid, 0)          # 只探测，不真正发信号
-        return True
     except OSError:
         return False
+
+    # os.kill(pid, 0) 对「已经退出、但父进程还没回收」的僵尸进程也会成功。
+    # 那样入口会一直显示 Running 并禁掉 Launch，即使设备进程早就没了。
+    # 所以再读一眼 /proc 的状态字段：'Z' 表示僵尸，按已退出处理。
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            state = proc_state(fh.read())
+    except OSError:
+        # 没有 /proc（例如 macOS）或读不到时，保守地按活着处理
+        return True
+    if state is None:
+        return True
+    return state != "Z"
 
 
 class DeviceCard(QFrame):

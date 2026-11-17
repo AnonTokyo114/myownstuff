@@ -398,6 +398,8 @@ class DeviceSelector(QFrame):
         self._device_options = device_options or (lambda: {})
         self._device = None
         self._busy = False
+        #: 外部（页面）正在执行耗时操作时置位，锁住连接控件
+        self._locked = False
 
         #: 每种连接方式的最后一次配置，切换型号时保留
         self._configs: dict[str, dict] = {
@@ -563,9 +565,19 @@ class DeviceSelector(QFrame):
     # ==================================================================
     # 连接 / 断开
     # ==================================================================
+    def set_locked(self, locked: bool) -> None:
+        """锁住连接类控件。
+
+        页面在执行耗时操作（例如转位）时调用，避免用户在半路 Disconnect
+        再重连 —— 那样旧操作的完成回调会写到新连接的界面上。
+        """
+        self._locked = bool(locked)
+        self._update_controls()
+
     def _update_controls(self) -> None:
         has_device = self._device is not None
-        idle = not self._busy
+        # 自身忙（连接/断开中）或外部忙（页面在执行设备操作）都算不空闲
+        idle = not self._busy and not self._locked
         spec = self.current_spec()
         supported = spec is not None and self._conn_kind in spec.transports
 

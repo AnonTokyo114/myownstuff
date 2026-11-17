@@ -143,6 +143,23 @@ git clone https://github.com/<你的用户名>/research-gui.git
 
 - `.git` 目录也在 OneDrive 里会同步，但它只有 150 KB 左右，无所谓。
 
+## 跑测试
+
+```
+.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+`tests/` 里是历次代码审查确认过的缺陷的回归用例（38 个），覆盖：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_devices.py` | HALT 中断整段序列、HALT 后仍能读位置、DAQ 归零失败保持 UNKNOWN、FW102C 协议与长超时、占位设备不碰硬件 |
+| `test_calculus.py` | 边界解析拒绝执行代码、小数边界不截断、幅值不等于发散、复值积分、自定义变量名、log10/log2 映射 |
+| `test_gui.py` | `/proc` 僵尸状态解析、滤光片轮会话切换与连接锁定、Others 收编滤光片轮 |
+
+只用标准库的 `unittest`，不需要额外装包。GUI 部分用 Qt 的 offscreen
+平台跑，没有图形环境也能过。
+
 ## 依赖
 
 `setup.bat` 会自动装。手动装：`pip install -r requirements.txt`
