@@ -157,6 +157,14 @@ class ConnectionDialog(QDialog):
         row.addStretch(1)
         outer.addLayout(row)
 
+        # 恢复保存的波特率；列表里没有就补进去（用户可能设过自定义值）
+        saved_baud = str(self._configs["serial"].get("baudrate", 115200))
+        index = self.baud_box.findText(saved_baud)
+        if index < 0:
+            self.baud_box.addItem(saved_baud)
+            index = self.baud_box.count() - 1
+        self.baud_box.setCurrentIndex(index)
+
         self.port_rescan_btn.clicked.connect(self._rescan_serial_ports)
         self._rescan_serial_ports()
         return page
@@ -293,22 +301,28 @@ class ConnectionDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _rescan_serial_ports(self) -> None:
-        current = self.port_box.currentData() or self.port_box.currentText()
+        # 优先保留当前选择；首次打开时用配置里保存的端口。
+        # 注意这里一定要有兜底：以前 current 为空时就不选中任何项，
+        # 于是下拉默认停在扫描到的第一项 —— 打开对话框什么都不改直接
+        # 确定，就把保存的 COM7 改成了 COM3。
+        current = (self.port_box.currentData()
+                   or self.port_box.currentText().strip()
+                   or str(self._configs["serial"].get("port", "COM6")))
+        current = str(current)
+
         self.port_box.blockSignals(True)
         self.port_box.clear()
         ports = tr_mod.available_serial_ports()
         for name, desc in ports:
             self.port_box.addItem(f"{name} — {desc}" if desc else name, name)
-        if not ports:
-            # 没扫描到也允许手输
-            fallback = str(self._configs["serial"].get("port", "COM6"))
-            self.port_box.addItem(fallback, fallback)
-        if current:
-            index = self.port_box.findData(current)
-            if index >= 0:
-                self.port_box.setCurrentIndex(index)
-            else:
-                self.port_box.setCurrentText(str(current))
+
+        index = self.port_box.findData(current)
+        if index >= 0:
+            self.port_box.setCurrentIndex(index)
+        else:
+            # 保存的端口不在扫描结果里（或者压根没扫到）：
+            # 直接把它显示在编辑框里，**不要**换成别的端口
+            self.port_box.setCurrentText(current)
         self.port_box.blockSignals(False)
 
     def _list_visa_resources(self) -> None:
@@ -347,12 +361,27 @@ class ConnectionDialog(QDialog):
     def selected_kind(self) -> str:
         return self.method_box.currentData() or "serial"
 
+    def selected_port(self) -> str:
+        """当前选中的端口名。
+
+        必须区分「选已有项」和「手输」：下拉是可编辑的，用户打字之后
+        currentData() 仍然返回**旧那一项**的端口，直接用它就会把界面
+        上显示的 COM9 提交成 COM3。
+        """
+        text = self.port_box.currentText().strip()
+        index = self.port_box.currentIndex()
+        if index >= 0 and text == self.port_box.itemText(index):
+            data = self.port_box.itemData(index)
+            if data:
+                return str(data)
+        # 文字和当前项不一致（或者没有选中项）-> 按用户输入的文字算，
+        # 去掉 "COM3 — USB Serial" 这种描述后缀
+        return text.split(" — ")[0].strip()
+
     def selected_params(self) -> dict:
         kind = self.selected_kind()
         if kind == "serial":
-            data = self.port_box.currentData()
-            port = (str(data) if data
-                    else self.port_box.currentText().split(" — ")[0].strip())
+            port = self.selected_port()
             return {"port": port or "COM6",
                     "baudrate": int(self.baud_box.currentText())}
         if kind == "lan":

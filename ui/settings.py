@@ -24,7 +24,23 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 
 #: 项目根目录（ui/settings.py -> 项目根）
-ROOT = Path(__file__).resolve().parent.parent
+def _project_root() -> Path:
+    """找出 settings.ini 应该放哪儿。
+
+    正常情况：``ui/settings.py`` 的上两级就是项目根。
+
+    单文件模式（``stage_standalone.py``）里本模块被内联，``__file__``
+    指向那个单独的文件，旁边没有 ``ui/`` 目录 —— 这时用**当前工作目录**，
+    也就是用户从哪儿启动就在哪儿存配置。
+    """
+    here = Path(__file__).resolve()
+    candidate = here.parent.parent
+    if (candidate / "ui").is_dir():
+        return candidate
+    return Path.cwd()
+
+
+ROOT = _project_root()
 #: 配置文件路径
 PATH = ROOT / "settings.ini"
 

@@ -29,6 +29,7 @@ MODULES = [
     ("core/nidaq.py", "NI-DAQ 模拟输出（Stage 页面不直接用，但设备注册表引用它）"),
     ("core/devices.py", "设备注册表"),
     ("ui/theme.py", "全局样式表（否则危险按钮没有样式）"),
+    ("ui/settings.py", "连接参数记忆（settings.ini）"),
     ("ui/workers.py", "后台任务"),
     ("ui/widgets/device_selector.py", "设备选择 + 连接组件"),
     ("ui/pages/stage_page.py", "Stage Controller 页面"),

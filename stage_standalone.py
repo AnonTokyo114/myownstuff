@@ -29,9 +29,11 @@ import logging
 import threading
 from typing import Callable
 from dataclasses import dataclass
+from pathlib import Path
 import sys
 
 from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QSettings
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -138,6 +140,14 @@ class Transport(ABC):
     def reset_buffers(self) -> None:
         ...
 
+    def set_timeout(self, seconds: float) -> None:
+        """调整读超时（秒）。
+
+        默认实现假设子类有 ``self.timeout`` 字段；用别的单位的子类
+        （例如 GPIB 用毫秒）需要覆盖这个方法。
+        """
+        self.timeout = float(seconds)
+
     def __repr__(self) -> str:              # pragma: no cover - 调试用
         return f"<{type(self).__name__} {self.description}>"
 
@@ -240,6 +250,15 @@ class SerialTransport(Transport):
             return int(self._ser.in_waiting)
         except Exception:                            # noqa: BLE001
             return 0
+
+    def set_timeout(self, seconds: float) -> None:
+        """同时改我们记录的秒数和 pyserial 的实际读超时。"""
+        self.timeout = float(seconds)
+        if self._ser is not None:
+            try:
+                self._ser.timeout = float(seconds)
+            except Exception:                        # noqa: BLE001
+                pass
 
     def reset_buffers(self) -> None:
         if not self.is_open:
@@ -490,6 +509,15 @@ class GpibTransport(Transport):
             return int(getattr(self._res, "bytes_in_buffer", 0)) + len(self._buf)
         except Exception:                            # noqa: BLE001
             return len(self._buf)
+
+    def set_timeout(self, seconds: float) -> None:
+        """VISA 用毫秒，这里换算一下并同步到已打开的资源。"""
+        self.timeout_ms = max(1, int(float(seconds) * 1000))
+        if self._res is not None:
+            try:
+                self._res.timeout = self.timeout_ms
+            except Exception:                        # noqa: BLE001
+                pass
 
     def reset_buffers(self) -> None:
         self._buf = b""
@@ -1523,6 +1551,14 @@ def _make_placeholder(transport: Transport, **options):
     return PlaceholderDevice(transport, **options)
 
 
+def _make_filterwheel(transport: Transport, **options):
+    return fw_mod.ThorlabsFW102C(transport, **options)
+
+
+def _make_placeholder_fw(transport: Transport, **options):
+    return fw_mod.PlaceholderFilterWheel(transport, **options)
+
+
 def _make_nidaq(transport: Transport, **options):
     return NIDaqDevice(transport, **options)
 
@@ -1579,6 +1615,26 @@ DEVICES["daq"] = [
         transports=("local",),
         description="No hardware. Lets you try the output flow safely.",
         factory=_make_placeholder_daq,
+    ),
+]
+
+
+#: 滤光片轮：Thorlabs FW102C（串口）
+DEVICES["filterwheel"] = [
+    DeviceSpec(
+        key="thorlabs_fw102c",
+        name="Thorlabs FW102C",
+        transports=("serial",),
+        description="Motorized filter wheel, 6 or 12 positions. "
+                    "Moves block until the wheel reports its prompt.",
+        factory=_make_filterwheel,
+    ),
+    DeviceSpec(
+        key="placeholder",
+        name="Placeholder device",
+        transports=("serial",),
+        description="No hardware. Lets you try the move flow safely.",
+        factory=_make_placeholder_fw,
     ),
 ]
 
@@ -1894,6 +1950,40 @@ def apply_theme(widget: QWidget) -> None:
 
 
 # ====================================================================
+#  连接参数记忆（settings.ini）   （源：ui/settings.py）
+# ====================================================================
+from pathlib import Path
+
+from PySide6.QtCore import QSettings
+
+#: 项目根目录（ui/settings.py -> 项目根）
+def _project_root() -> Path:
+    """找出 settings.ini 应该放哪儿。
+
+    正常情况：``ui/settings.py`` 的上两级就是项目根。
+
+    单文件模式（``stage_standalone.py``）里本模块被内联，``__file__``
+    指向那个单独的文件，旁边没有 ``ui/`` 目录 —— 这时用**当前工作目录**，
+    也就是用户从哪儿启动就在哪儿存配置。
+    """
+    here = Path(__file__).resolve()
+    candidate = here.parent.parent
+    if (candidate / "ui").is_dir():
+        return candidate
+    return Path.cwd()
+
+
+ROOT = _project_root()
+#: 配置文件路径
+PATH = ROOT / "settings.ini"
+
+
+def settings() -> QSettings:
+    """打开的 settings.ini（不存在时写入时自动创建）。"""
+    return QSettings(str(PATH), QSettings.Format.IniFormat)
+
+
+# ====================================================================
 #  后台任务   （源：ui/workers.py）
 # ====================================================================
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
@@ -2088,6 +2178,14 @@ class ConnectionDialog(QDialog):
         row.addStretch(1)
         outer.addLayout(row)
 
+        # 恢复保存的波特率；列表里没有就补进去（用户可能设过自定义值）
+        saved_baud = str(self._configs["serial"].get("baudrate", 115200))
+        index = self.baud_box.findText(saved_baud)
+        if index < 0:
+            self.baud_box.addItem(saved_baud)
+            index = self.baud_box.count() - 1
+        self.baud_box.setCurrentIndex(index)
+
         self.port_rescan_btn.clicked.connect(self._rescan_serial_ports)
         self._rescan_serial_ports()
         return page
@@ -2224,22 +2322,28 @@ class ConnectionDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _rescan_serial_ports(self) -> None:
-        current = self.port_box.currentData() or self.port_box.currentText()
+        # 优先保留当前选择；首次打开时用配置里保存的端口。
+        # 注意这里一定要有兜底：以前 current 为空时就不选中任何项，
+        # 于是下拉默认停在扫描到的第一项 —— 打开对话框什么都不改直接
+        # 确定，就把保存的 COM7 改成了 COM3。
+        current = (self.port_box.currentData()
+                   or self.port_box.currentText().strip()
+                   or str(self._configs["serial"].get("port", "COM6")))
+        current = str(current)
+
         self.port_box.blockSignals(True)
         self.port_box.clear()
         ports = available_serial_ports()
         for name, desc in ports:
             self.port_box.addItem(f"{name} — {desc}" if desc else name, name)
-        if not ports:
-            # 没扫描到也允许手输
-            fallback = str(self._configs["serial"].get("port", "COM6"))
-            self.port_box.addItem(fallback, fallback)
-        if current:
-            index = self.port_box.findData(current)
-            if index >= 0:
-                self.port_box.setCurrentIndex(index)
-            else:
-                self.port_box.setCurrentText(str(current))
+
+        index = self.port_box.findData(current)
+        if index >= 0:
+            self.port_box.setCurrentIndex(index)
+        else:
+            # 保存的端口不在扫描结果里（或者压根没扫到）：
+            # 直接把它显示在编辑框里，**不要**换成别的端口
+            self.port_box.setCurrentText(current)
         self.port_box.blockSignals(False)
 
     def _list_visa_resources(self) -> None:
@@ -2278,12 +2382,27 @@ class ConnectionDialog(QDialog):
     def selected_kind(self) -> str:
         return self.method_box.currentData() or "serial"
 
+    def selected_port(self) -> str:
+        """当前选中的端口名。
+
+        必须区分「选已有项」和「手输」：下拉是可编辑的，用户打字之后
+        currentData() 仍然返回**旧那一项**的端口，直接用它就会把界面
+        上显示的 COM9 提交成 COM3。
+        """
+        text = self.port_box.currentText().strip()
+        index = self.port_box.currentIndex()
+        if index >= 0 and text == self.port_box.itemText(index):
+            data = self.port_box.itemData(index)
+            if data:
+                return str(data)
+        # 文字和当前项不一致（或者没有选中项）-> 按用户输入的文字算，
+        # 去掉 "COM3 — USB Serial" 这种描述后缀
+        return text.split(" — ")[0].strip()
+
     def selected_params(self) -> dict:
         kind = self.selected_kind()
         if kind == "serial":
-            data = self.port_box.currentData()
-            port = (str(data) if data
-                    else self.port_box.currentText().split(" — ")[0].strip())
+            port = self.selected_port()
             return {"port": port or "COM6",
                     "baudrate": int(self.baud_box.currentText())}
         if kind == "lan":
@@ -2330,14 +2449,12 @@ class DeviceSelector(QFrame):
         self._device_options = device_options or (lambda: {})
         self._device = None
         self._busy = False
+        #: 外部（页面）正在执行耗时操作时置位，锁住连接控件
+        self._locked = False
 
-        #: 每种连接方式的最后一次配置，切换型号时保留
-        self._configs: dict[str, dict] = {
-            "serial": {"port": "COM6", "baudrate": 115200},
-            "lan": {"host": "192.168.1.100", "port": 5025},
-            "gpib": {"address": "GPIB0::12::INSTR"},
-            "local": {"resource": "Dev1"},
-        }
+        #: 每种连接方式的最后一次配置，切换型号时保留。
+        #: 初值从 settings.ini 读，所以改过一次端口之后就不用每次再选。
+        self._configs: dict[str, dict] = self._load_configs()
         #: 当前使用的连接方式
         self._conn_kind = "serial"
 
@@ -2489,15 +2606,72 @@ class DeviceSelector(QFrame):
         kind, params = dialog.result_config()
         self._conn_kind = kind
         self._configs[kind] = params
+        self._save_configs()          # 记住这次的选择，下次打开就是这个
         self._refresh_conn_button()
         self.log.emit("Connection set to " + dialog.summary())
 
     # ==================================================================
+    # 配置持久化
+    # ==================================================================
+    #: 各类连接方式的出厂默认值（settings.ini 里没有时用它）
+    DEFAULT_CONFIGS = {
+        "serial": {"port": "COM6", "baudrate": 115200},
+        "lan": {"host": "192.168.1.100", "port": 5025},
+        "gpib": {"address": "GPIB0::12::INSTR"},
+        "local": {"resource": "Dev1"},
+    }
+
+    def _load_configs(self) -> dict[str, dict]:
+        """从 settings.ini 读这个设备的连接参数。
+
+        每个设备（按 kind 分组）各自记住自己的串口，所以 Stage 用 COM7、
+        滤光片轮用 COM4 互不影响。
+        """
+        configs = {k: dict(v) for k, v in self.DEFAULT_CONFIGS.items()}
+        store = settings()
+        store.beginGroup(self._kind)
+        for transport, conf in configs.items():
+            store.beginGroup(transport)
+            for key in list(conf):
+                if not store.contains(key):
+                    continue
+                raw = store.value(key)
+                try:
+                    conf[key] = type(conf[key])(raw)
+                except (TypeError, ValueError):
+                    pass          # 文件被手改坏了就退回默认值
+            store.endGroup()
+        store.endGroup()
+        return configs
+
+    def _save_configs(self) -> None:
+        """把当前连接参数写回 settings.ini。"""
+        store = settings()
+        store.beginGroup(self._kind)
+        for transport, conf in self._configs.items():
+            store.beginGroup(transport)
+            for key, value in conf.items():
+                store.setValue(key, value)
+            store.endGroup()
+        store.endGroup()
+        store.sync()
+
+    # ==================================================================
     # 连接 / 断开
     # ==================================================================
+    def set_locked(self, locked: bool) -> None:
+        """锁住连接类控件。
+
+        页面在执行耗时操作（例如转位）时调用，避免用户在半路 Disconnect
+        再重连 —— 那样旧操作的完成回调会写到新连接的界面上。
+        """
+        self._locked = bool(locked)
+        self._update_controls()
+
     def _update_controls(self) -> None:
         has_device = self._device is not None
-        idle = not self._busy
+        # 自身忙（连接/断开中）或外部忙（页面在执行设备操作）都算不空闲
+        idle = not self._busy and not self._locked
         spec = self.current_spec()
         supported = spec is not None and self._conn_kind in spec.transports
 
