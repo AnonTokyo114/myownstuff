@@ -301,14 +301,14 @@ class ConnectionDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _rescan_serial_ports(self) -> None:
-        # 优先保留当前选择；首次打开时用配置里保存的端口。
-        # 注意这里一定要有兜底：以前 current 为空时就不选中任何项，
-        # 于是下拉默认停在扫描到的第一项 —— 打开对话框什么都不改直接
-        # 确定，就把保存的 COM7 改成了 COM3。
-        current = (self.port_box.currentData()
-                   or self.port_box.currentText().strip()
+        # 保留「用户当前看到并选择」的端口。
+        #
+        # 必须用 selected_port() 而不是 currentData()：手输 COM9 之后
+        # currentData() 仍然返回**旧列表项**（COM7），拿它当 current 会让
+        # 刷新把界面改回 COM7，接着点 OK 就保存了错的端口。
+        # 同理，保存的端口不在扫描结果里时也要原样留住。
+        current = (self.selected_port()
                    or str(self._configs["serial"].get("port", "COM6")))
-        current = str(current)
 
         self.port_box.blockSignals(True)
         self.port_box.clear()

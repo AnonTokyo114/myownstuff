@@ -147,6 +147,40 @@ class TestConnectionDialog(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(dlg.selected_port(), "COM4")
 
+    # ---- 刷新端口列表不能改变当前选择 ----
+    def test_rescan_keeps_typed_port(self):
+        """手输之后点刷新，不能被改回列表里的旧项。
+
+        currentData() 在手输后仍返回旧列表项，直接拿它当 current 会
+        把 COM9 改回 COM7，接着 OK 就保存了错的端口。
+        """
+        dlg = self._dialog(port="COM7")
+        dlg.port_box.setCurrentText("COM9")
+        self.app.processEvents()
+        self.assertEqual(dlg.selected_port(), "COM9")
+
+        dlg._rescan_serial_ports()
+        self.app.processEvents()
+        self.assertEqual(dlg.selected_port(), "COM9")
+        self.assertEqual(dlg.port_box.currentText().strip(), "COM9")
+
+    def test_rescan_keeps_saved_port_not_in_scan(self):
+        """保存的端口不在扫描结果里，刷新也不该换成别的端口。"""
+        self.tr.available_serial_ports = lambda: [
+            ("COM3", "USB"), ("COM7", "FTDI")]
+        dlg = self._dialog(port="COM9")
+        dlg._rescan_serial_ports()
+        self.app.processEvents()
+        self.assertEqual(dlg.selected_port(), "COM9")
+
+    def test_rescan_keeps_selected_list_item(self):
+        dlg = self._dialog(port="COM7")
+        dlg.port_box.setCurrentIndex(dlg.port_box.findData("COM4"))
+        self.app.processEvents()
+        dlg._rescan_serial_ports()
+        self.app.processEvents()
+        self.assertEqual(dlg.selected_port(), "COM4")
+
 
 if __name__ == "__main__":
     unittest.main()
