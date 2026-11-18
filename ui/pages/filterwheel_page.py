@@ -346,15 +346,47 @@ class FilterWheelPage(QWidget):
                     "— result ignored.")
                 return
             self._apply_state(state)
-            self._set_busy(False, f"Wheel type set to {target} slots.")
+
+            # 「命令发出去了」不等于「设备采纳了」：必须用回读值确认。
+            try:
+                actual = int(state.get("pcount", target))
+            except (TypeError, ValueError):
+                actual = target
+            if actual == target:
+                self._set_busy(False, f"Wheel type set to {target} slots.")
+            else:
+                self._set_busy(
+                    False,
+                    f"⚠ Requested {target} slots but the controller "
+                    f"reports {actual} — the setting was not applied.")
+                QMessageBox.warning(
+                    self, "Wheel type not applied",
+                    f"Requested {target} slots, but reading it back gives "
+                    f"{actual}.\n\nThe controller did not accept the "
+                    "setting. Check which wheel is actually installed.")
 
         def failed(msg: str) -> None:
             if session != self._session:
                 self._append_log(
                     f"Wheel type change failed after switching: {msg}")
                 return
-            self._set_busy(False, f"Set wheel type failed: {msg}")
-            QMessageBox.critical(self, "Set wheel type failed", msg)
+
+            # set_wheel_type() 可能**已经成功**，只是后面的 snapshot 读失败。
+            # 这时设备到底是什么状态是未知的，必须把缓存里的 pcount 丢掉：
+            # 留着旧值 -> 下次改回原值会被 "already configured" 跳过，
+            # 而设备的实际值已经不是它了（审查 #1）。
+            self._state.pop("pcount", None)
+            self._set_busy(
+                False,
+                "Set wheel type may have taken effect, but reading the "
+                f"state failed: {msg}. Press Refresh to see the current "
+                "slot count.")
+            QMessageBox.warning(
+                self, "Wheel type state unknown",
+                "The command was sent, but reading the wheel state failed, "
+                "so it is not known whether the change took effect.\n\n"
+                f"{msg}\n\n"
+                "Press Refresh to read the current slot count.")
 
         self._set_busy(True, f"Setting wheel type to {target} slots…")
         run_async(work, done, failed)
