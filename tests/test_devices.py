@@ -251,6 +251,10 @@ class FakeFWTransport(Transport):
             body = "FW102C"
         elif cmd == "pcount?":
             body = str(self._pcount)
+        elif cmd.startswith("pcount="):
+            self._pcount = int(cmd.split("=")[1])
+            self._pos = min(self._pos, self._pcount)
+            body = ""
         elif cmd == "pos?":
             body = str(self._pos)
         elif cmd.startswith("pos="):
@@ -340,6 +344,58 @@ class TestFilterWheelPlaceholder(unittest.TestCase):
         fw.connect()
         self.assertTrue(fw.is_connected)
         fw.close()
+
+
+class TestFilterWheelSlots(unittest.TestCase):
+    """轮子位数（6/12）既要能读回，也要能设置。"""
+
+    def test_default_is_six(self):
+        fw = PlaceholderFilterWheel(LocalTransport("COM7"))
+        fw.connect()
+        self.assertEqual(fw.position_count, 6)
+        fw.close()
+
+    def test_set_and_read_back(self):
+        drv = ThorlabsFW102C(FakeFWTransport())
+        drv.connect()
+        self.assertEqual(drv.position_count, 6)
+        drv.set_wheel_type(12)
+        self.assertEqual(drv.position_count, 12)
+        self.assertEqual(drv.get_wheel_type(), 12)
+        drv.close()
+
+    def test_protocol_sends_pcount(self):
+        transport = FakeFWTransport()
+        drv = ThorlabsFW102C(transport)
+        drv.connect()
+        drv.set_wheel_type(12)
+        self.assertIn("pcount=12", transport.sent)
+        drv.close()
+
+    def test_invalid_type_rejected(self):
+        drv = ThorlabsFW102C(FakeFWTransport())
+        drv.connect()
+        with self.assertRaises(ValueError):
+            drv.set_wheel_type(8)
+        drv.close()
+
+    def test_shrinking_clamps_position(self):
+        """12 位轮在第 10 位时改成 6 位，位置要收回到范围内。"""
+        fw = PlaceholderFilterWheel(LocalTransport("COM7"))
+        fw.connect()
+        fw.set_wheel_type(12)
+        fw.set_pos(10)
+        fw.set_wheel_type(6)
+        self.assertEqual(fw.position_count, 6)
+        self.assertLessEqual(fw.get_pos(), 6)
+        fw.close()
+
+    def test_snapshot_reports_pcount(self):
+        drv = ThorlabsFW102C(FakeFWTransport())
+        drv.connect()
+        drv.set_wheel_type(12)
+        self.assertEqual(drv.snapshot()["pcount"], 12)
+        drv.close()
 
 
 if __name__ == "__main__":

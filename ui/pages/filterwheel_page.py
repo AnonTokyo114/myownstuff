@@ -100,18 +100,30 @@ class FilterWheelPage(QWidget):
         self.identity_label.setWordWrap(True)
         grid.addWidget(self.identity_label, 1, 1, 1, 3)
 
-        grid.addWidget(QLabel("Positions:"), 2, 0)
-        self.positions_label = QLabel("—")
-        grid.addWidget(self.positions_label, 2, 1)
+        grid.addWidget(QLabel("Slots:"), 2, 0)
+        # 这个既是「查看」也是「设置」：连接后自动显示设备上报的位数，
+        # 改了再点 Set 就写回控制器（pcount=N）。
+        self.slots_box = QComboBox()
+        self.slots_box.addItem("6", 6)
+        self.slots_box.addItem("12", 12)
+        self.slots_box.setFixedWidth(80)
+        grid.addWidget(self.slots_box, 2, 1)
+
+        self.set_slots_btn = QPushButton("Set")
+        self.set_slots_btn.setObjectName("ghost")
+        self.set_slots_btn.setFixedWidth(60)
+        self.set_slots_btn.setToolTip(
+            "Tell the controller which wheel is installed (must match the hardware)")
+        grid.addWidget(self.set_slots_btn, 2, 2)
+
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setObjectName("ghost")
+        grid.addWidget(self.refresh_btn, 2, 3)
 
         grid.addWidget(QLabel("Current:"), 3, 0)
         self.position_value = QLabel("—")
         self.position_value.setObjectName("monoBig")
         grid.addWidget(self.position_value, 3, 1)
-
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setObjectName("ghost")
-        grid.addWidget(self.refresh_btn, 2, 2, 2, 1)
 
         grid.addWidget(QLabel("Move to:"), 4, 0)
         self.pos_box = QComboBox()
@@ -201,6 +213,7 @@ class FilterWheelPage(QWidget):
             lambda msg: QMessageBox.critical(self, "Connect failed", msg))
 
         self.refresh_btn.clicked.connect(self.refresh_state)
+        self.set_slots_btn.clicked.connect(self.set_slots)
         self.move_btn.clicked.connect(self.move_to)
         self.apply_btn.clicked.connect(self.apply_settings)
         self.save_btn.clicked.connect(self.save_defaults)
@@ -237,7 +250,6 @@ class FilterWheelPage(QWidget):
         self.selector.set_locked(False)
         self._state = {}
         self.identity_label.setText("—")
-        self.positions_label.setText("—")
         self.position_value.setText("—")
         self.pos_box.clear()
         self._update_controls()
@@ -259,21 +271,7 @@ class FilterWheelPage(QWidget):
                     "State read finished after the connection changed — "
                     "result ignored.")
                 return
-            self._loading = True
-            try:
-                self._state = dict(state)
-                pcount = int(state.get("pcount", 6))
-                position = int(state.get("position", 1))
-
-                self.positions_label.setText(f"{pcount}")
-                self.position_value.setText(str(position))
-                self._rebuild_positions(pcount, position)
-
-                self._select(self.trig_box, state.get("trig"))
-                self._select(self.speed_box, state.get("speed"))
-                self._select(self.sensor_box, state.get("sensors"))
-            finally:
-                self._loading = False
+            self._apply_state(state)
             self._set_busy(False)
 
         def failed(msg: str) -> None:
@@ -283,6 +281,82 @@ class FilterWheelPage(QWidget):
             self._set_busy(False, f"Read state failed: {msg}")
 
         self._set_busy(True, "Reading wheel state…")
+        run_async(work, done, failed)
+
+    def _apply_state(self, state: dict) -> None:
+        """把从设备读回的状态铺到界面上（Refresh 和 Set slots 共用）。"""
+        self._loading = True
+        try:
+            self._state = dict(state)
+            pcount = int(state.get("pcount", 6))
+            position = int(state.get("position", 1))
+
+            self._select(self.slots_box, pcount)
+            self.position_value.setText(str(position))
+            self._rebuild_positions(pcount, position)
+
+            self._select(self.trig_box, state.get("trig"))
+            self._select(self.speed_box, state.get("speed"))
+            self._select(self.sensor_box, state.get("sensors"))
+        finally:
+            self._loading = False
+
+    def set_slots(self) -> None:
+        """把界面选的位数写回控制器（pcount=N）。
+
+        这个值**必须**和实际装的轮子一致：设小了会转不到位，设大了会
+        试图转到不存在的槽位。所以改之前一定要确认。
+        """
+        dev = self.device
+        if dev is None or self._busy:
+            return
+
+        target = self.slots_box.currentData()
+        if target is None:
+            return
+        target = int(target)
+        current = int(self._state.get("pcount", 0) or 0)
+
+        if current and target == current:
+            self._append_log(f"Wheel is already configured for {target} slots.")
+            return
+
+        detail = (f"The controller is currently set to {current} slots.\n\n"
+                  if current else "")
+        ok = QMessageBox.question(
+            self, "Change wheel type",
+            detail + f"Set it to {target} slots?\n\n"
+            "This must match the wheel actually installed. If it does not, "
+            "the wheel may try to move to a slot that does not exist.")
+        if ok != QMessageBox.StandardButton.Yes:
+            self._append_log("Wheel type change cancelled.")
+            self._select(self.slots_box, current)      # 下拉复位
+            return
+
+        session = self._session
+
+        def work():
+            dev.set_wheel_type(target)
+            return dev.snapshot()
+
+        def done(state) -> None:
+            if session != self._session:
+                self._append_log(
+                    "Wheel type change finished after the connection changed "
+                    "— result ignored.")
+                return
+            self._apply_state(state)
+            self._set_busy(False, f"Wheel type set to {target} slots.")
+
+        def failed(msg: str) -> None:
+            if session != self._session:
+                self._append_log(
+                    f"Wheel type change failed after switching: {msg}")
+                return
+            self._set_busy(False, f"Set wheel type failed: {msg}")
+            QMessageBox.critical(self, "Set wheel type failed", msg)
+
+        self._set_busy(True, f"Setting wheel type to {target} slots…")
         run_async(work, done, failed)
 
     def _rebuild_positions(self, pcount: int, current: int) -> None:
@@ -434,7 +508,9 @@ class FilterWheelPage(QWidget):
         self.move_btn.setEnabled(connected and idle and self.pos_box.count() > 0)
         self.apply_btn.setEnabled(connected and idle)
         self.save_btn.setEnabled(connected and idle)
-        for box in (self.pos_box, self.trig_box, self.speed_box, self.sensor_box):
+        self.set_slots_btn.setEnabled(connected and idle)
+        for box in (self.slots_box, self.pos_box, self.trig_box,
+                    self.speed_box, self.sensor_box):
             box.setEnabled(connected and idle)
 
     # ------------------------------------------------------------------
