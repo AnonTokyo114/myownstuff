@@ -582,6 +582,13 @@ class TaylorTab(_BaseTab):
             # form(0) -> buttons(1) -> 图(2) -> 结果(3)
             self.layout().insertWidget(2, box)
 
+        # 逐项列表有 order+1 行，默认高度只够看两行，往上调一点
+        # （其余标签页的默认高度保持不变）
+        try:
+            self.result._numeric.setMinimumHeight(200)
+        except Exception:                        # noqa: BLE001
+            pass
+
     def clear(self) -> None:
         super().clear()
         if self.figure is not None:
@@ -691,6 +698,21 @@ class TaylorTab(_BaseTab):
             lines.append(f"P_{order}({var}) = {symbolic_text}")
             for note in notes:
                 lines.append(f"Note: {note}")
+
+            # 逐项列出：合并后的多项式会省掉零项、还按降幂排，看不出
+            # 「第 k 阶对应什么系数」。这里按幂次从小到大全部写出来。
+            try:
+                coeffs = cs.coefficient_list(poly, order, center_text)
+                raw_center = center_text.strip()
+                basis = (var if raw_center in ("", "0", "0.0", "+0")
+                         else f"({var} - {raw_center})")
+                lines.append("")
+                lines.append(f"term by term, coefficient of {basis}^k:")
+                for power, coeff in enumerate(coeffs):
+                    lines.append(f"  k={power:<3} {coeff}")
+            except Exception as exc:             # noqa: BLE001
+                lines.append(
+                    f"Term breakdown failed: {type(exc).__name__}: {exc}")
         except Exception as exc:                 # noqa: BLE001
             lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
 

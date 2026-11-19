@@ -250,6 +250,39 @@ class TestTaylor(unittest.TestCase):
             txt, _latex, _notes = cs.taylor(expr, "x", point=0, order=order)
             self.assertTrue(txt, f"{expr} 应该有结果")
 
+    # ---- 逐项系数 ----
+    def test_coefficient_list_sin(self):
+        """sin(x) 展开到 5 阶：偶次项系数必须是 0（不能因为省掉就不写）。"""
+        poly, _notes = cs.taylor_poly("sin(x)", "x", point=0, order=5)
+        coeffs = cs.coefficient_list(poly, 5, 0)
+        self.assertEqual([str(c) for c in coeffs],
+                         ["0", "1", "0", "-1/6", "0", "1/120"])
+
+    def test_coefficient_list_exp(self):
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=4)
+        coeffs = cs.coefficient_list(poly, 4, 0)
+        self.assertEqual([str(c) for c in coeffs],
+                         ["1", "1", "1/2", "1/6", "1/24"])
+
+    def test_coefficient_list_nonzero_center(self):
+        """非零展开点：系数对应的是 (x - a)^k，不是 x^k。"""
+        poly, _notes = cs.taylor_poly("sin(x)", "x", point="pi/2", order=4)
+        coeffs = cs.coefficient_list(poly, 4, "pi/2")
+        self.assertEqual([str(c) for c in coeffs],
+                         ["1", "0", "-1/2", "0", "1/24"])
+
+    def test_coefficient_list_constant(self):
+        poly, _notes = cs.taylor_poly("3", "x", point=0, order=2)
+        coeffs = cs.coefficient_list(poly, 2, 0)
+        self.assertEqual([str(c) for c in coeffs], ["3", "0", "0"])
+
+    def test_coefficient_list_length(self):
+        """长度固定是 order+1，界面靠它按阶数逐行打印。"""
+        for order in (0, 1, 3, 7):
+            poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=order)
+            coeffs = cs.coefficient_list(poly, order, 0)
+            self.assertEqual(len(coeffs), order + 1)
+
     # ---- 采样区间的数值卫生 ----
     def test_radius_never_negative(self):
         """抖动采样曾经算出负半径，把展开点排除在区间外。"""

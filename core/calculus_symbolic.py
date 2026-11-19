@@ -502,6 +502,40 @@ def expansion_holds(expr, var, poly, point, tolerance=1e-6,
     return radius, left, right, spread, (min(steps) if steps else float(span))
 
 
+def coefficient_list(poly, degree, point=0):
+    """把展开式按 ``(x - point)`` 的幂次拆成系数，**索引就是幂次**。
+
+    界面要「每一项都写出来」时用这个：符号表达式会省掉零项、还按降幂
+    排，看不出「第 k 阶对应什么系数」。
+
+    例如 sin(x) 展开到 5 阶返回
+    ``[0, 1, 0, -1/6, 0, 1/120]``，长度是 ``degree + 1``。
+    """
+    sp = _require()
+    degree = max(0, int(degree))
+
+    symbols = sorted(getattr(poly, "free_symbols", ()), key=str)
+    if not symbols:                      # 常数多项式：只有 0 次项
+        return [poly] + [sp.Integer(0)] * degree
+
+    symbol = symbols[0]
+    try:
+        # 允许直接传界面里的字符串（"pi/2" 之类），保持精确
+        shift = (_sympy_constant(point) if isinstance(point, str)
+                 else sp.sympify(point))
+    except Exception:                    # noqa: BLE001
+        shift = sp.Integer(0)
+
+    # 换成 t = x - point 再取系数，非零展开点也能直接读出每一项
+    t = sp.Symbol("_t")
+    try:
+        shifted = sp.expand(poly.subs(symbol, t + shift))
+        poly_obj = sp.Poly(shifted, t)
+    except Exception:                    # noqa: BLE001
+        return [sp.Integer(0)] * (degree + 1)
+    return [poly_obj.coeff_monomial(t ** power) for power in range(degree + 1)]
+
+
 def _validate_taylor(expr_s, symbol, poly, center, order):
     """确认 poly 真的是 expr 在 center 处的 order 阶泰勒多项式。
 
