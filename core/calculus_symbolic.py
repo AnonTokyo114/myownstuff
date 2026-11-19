@@ -502,6 +502,36 @@ def expansion_holds(expr, var, poly, point, tolerance=1e-6,
     return radius, left, right, spread, (min(steps) if steps else float(span))
 
 
+def format_polynomial(coeffs, basis="x"):
+    """把系数列表拼成**升幂**的多项式字符串。
+
+    ``[1, 1, 1/2]`` -> ``"1 + x + x**2/2"``。
+
+    零系数跳过（`sin` 的偶次项不该写成 ``0*x**2``）；系数为 1 时省略；
+    负数用 ``" - "`` 连接，不会出现 ``"+ -1/6*x**3"``。
+    """
+    parts: list[tuple[bool, str]] = []
+    for power, coeff in enumerate(coeffs):
+        if coeff == 0:
+            continue
+        negative = bool(getattr(coeff, "is_negative", False))
+        magnitude = -coeff if negative else coeff
+        if power == 0:
+            body = str(magnitude)
+        else:
+            variable = basis if power == 1 else f"{basis}**{power}"
+            body = variable if magnitude == 1 else f"{magnitude}*{variable}"
+        parts.append((negative, body))
+
+    if not parts:
+        return "0"
+    first_negative, first_body = parts[0]
+    text = ("-" + first_body) if first_negative else first_body
+    for negative, body in parts[1:]:
+        text += (" - " if negative else " + ") + body
+    return text
+
+
 def coefficient_list(poly, degree, point=0):
     """把展开式按 ``(x - point)`` 的幂次拆成系数，**索引就是幂次**。
 

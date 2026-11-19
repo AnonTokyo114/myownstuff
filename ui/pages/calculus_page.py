@@ -113,7 +113,7 @@ class ResultPanel(QWidget):
             png = None
             render_error = ""
             try:
-                png = lr.render_latex(latex)
+                png = lr.render_latex(latex, fontsize=13)
             except Exception as exc:             # noqa: BLE001
                 # mathtext 只支持数学模式子集：cases / aligned 这类 LaTeX
                 # 会抛 LatexError。预览失败不该把已经算好的数值和源码吞掉。
@@ -585,7 +585,7 @@ class TaylorTab(_BaseTab):
         # 逐项列表有 order+1 行，默认高度只够看两行，往上调一点
         # （其余标签页的默认高度保持不变）
         try:
-            self.result._numeric.setMinimumHeight(200)
+            self.result._numeric.setMinimumHeight(260)
         except Exception:                        # noqa: BLE001
             pass
 
@@ -699,17 +699,24 @@ class TaylorTab(_BaseTab):
             for note in notes:
                 lines.append(f"Note: {note}")
 
-            # 逐项列出：合并后的多项式会省掉零项、还按降幂排，看不出
-            # 「第 k 阶对应什么系数」。这里按幂次从小到大全部写出来。
+            # 累进式：每一阶都在前一阶基础上多一项，看得出收敛过程。
+            # 最后再给带 O() 的完整写法，明确截断在哪里。
             try:
                 coeffs = cs.coefficient_list(poly, order, center_text)
                 raw_center = center_text.strip()
                 basis = (var if raw_center in ("", "0", "0.0", "+0")
                          else f"({var} - {raw_center})")
+
                 lines.append("")
-                lines.append(f"term by term, coefficient of {basis}^k:")
-                for power, coeff in enumerate(coeffs):
-                    lines.append(f"  k={power:<3} {coeff}")
+                lines.append("progressive (one more term each order):")
+                for k in range(order + 1):
+                    partial = cs.format_polynomial(coeffs[:k + 1], basis)
+                    lines.append(f"  P_{k}({var}) = {partial}")
+
+                lines.append("")
+                lines.append(
+                    f"f({var}) = {cs.format_polynomial(coeffs, basis)}"
+                    f" + O({basis}**{order + 1})")
             except Exception as exc:             # noqa: BLE001
                 lines.append(
                     f"Term breakdown failed: {type(exc).__name__}: {exc}")
@@ -735,6 +742,15 @@ class TaylorTab(_BaseTab):
                                             tol, order))
                 except Exception as exc:         # noqa: BLE001
                     lines.append(f"Plot failed: {type(exc).__name__}: {exc}")
+
+        # 按内容行数调数值区高度：累进式是 order+3 行上下，固定高度会把
+        # 最后一行（带 O() 的完整式子）挤到内部滚动区外看不见。
+        # 上限 420px，再多就交给内部滚动条。
+        try:
+            self.result._numeric.setMinimumHeight(
+                min(420, max(220, 21 * len(lines))))
+        except Exception:                        # noqa: BLE001
+            pass
 
         if symbolic_text is None:
             self.result.show_result(error="\n".join(lines))
@@ -824,7 +840,8 @@ class CalculusPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         holder = QWidget()
         holder_layout = QVBoxLayout(holder)
-        holder_layout.setContentsMargins(0, 0, 0, 0)
+        # 底部留一点空：滚到底时最后一行的下沿不会被窗口边缘裁掉
+        holder_layout.setContentsMargins(0, 0, 0, 14)
         holder_layout.addWidget(tabs)
         scroll.setWidget(holder)
 

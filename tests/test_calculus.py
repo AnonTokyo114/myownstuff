@@ -283,6 +283,44 @@ class TestTaylor(unittest.TestCase):
             coeffs = cs.coefficient_list(poly, order, 0)
             self.assertEqual(len(coeffs), order + 1)
 
+    # ---- 升幂格式化 ----
+    def test_format_polynomial_ascending(self):
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=4)
+        text = cs.format_polynomial(cs.coefficient_list(poly, 4, 0))
+        self.assertEqual(text, "1 + x + 1/2*x**2 + 1/6*x**3 + 1/24*x**4")
+
+    def test_format_polynomial_skips_zeros_and_signs(self):
+        """零项不写；负项用 " - " 连接，不能出现 "+ -"。"""
+        poly, _notes = cs.taylor_poly("sin(x)", "x", point=0, order=5)
+        text = cs.format_polynomial(cs.coefficient_list(poly, 5, 0))
+        self.assertEqual(text, "x - 1/6*x**3 + 1/120*x**5")
+        self.assertNotIn("+ -", text)
+        # 零项不能出现（用恰好相等的断言就够了，额外查子串会被
+        # "1/120*x**5" 里的 "20*x" 误伤）
+        self.assertNotIn("*x**2", text)
+        self.assertNotIn("1*x", text)
+
+    def test_format_polynomial_constant(self):
+        poly, _notes = cs.taylor_poly("3", "x", point=0, order=2)
+        self.assertEqual(cs.format_polynomial(cs.coefficient_list(poly, 2, 0)),
+                         "3")
+
+    def test_format_polynomial_nonzero_basis(self):
+        poly, _notes = cs.taylor_poly("sin(x)", "x", point="pi/2", order=4)
+        text = cs.format_polynomial(
+            cs.coefficient_list(poly, 4, "pi/2"), "(x - pi/2)")
+        self.assertIn("(x - pi/2)**2", text)
+        self.assertTrue(text.startswith("1 "))
+
+    def test_progressive_prefixes_make_sense(self):
+        """累进式：P_k 的项数不超过 P_(k+1)。"""
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=4)
+        coeffs = cs.coefficient_list(poly, 4, 0)
+        lengths = [
+            len(cs.format_polynomial(coeffs[:k + 1])) for k in range(5)
+        ]
+        self.assertEqual(lengths, sorted(lengths))
+
     # ---- 采样区间的数值卫生 ----
     def test_radius_never_negative(self):
         """抖动采样曾经算出负半径，把展开点排除在区间外。"""
