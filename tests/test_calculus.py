@@ -357,6 +357,23 @@ class TestTaylor(unittest.TestCase):
         b = cs.taylor("exp(x)", "x", point="2", order=2)[0]
         self.assertEqual(a, b)
 
+    # ---- 平移基底 ----
+    def test_basis_text(self):
+        sp = cs._require()
+        self.assertEqual(cs.basis_text("x", sp.Integer(0)), "x")
+        self.assertEqual(cs.basis_text("x", sp.Integer(2)), "(x - 2)")
+        self.assertEqual(cs.basis_text("x", sp.pi / 2), "(x - pi/2)")
+        # 关键回归：展开点自身是加法时必须整体加括号
+        self.assertEqual(cs.basis_text("x", sp.pi / 2 + 1),
+                         "(x - (1 + pi/2))")
+        self.assertEqual(cs.basis_text("x", -sp.E), "(x + E)")
+
+    def test_sum_center_series_matches_numeric_center(self):
+        """展开点 "pi/2+1" 和它的数值形式必须给出同一个展开。"""
+        a = cs.taylor("exp(x)", "x", point="pi/2+1", order=1)[0]
+        b = cs.taylor("exp(x)", "x", point="1+pi/2", order=1)[0]
+        self.assertEqual(a, b)
+
     # ---- 升幂格式化 ----
     def test_format_polynomial_ascending(self):
         poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=4)

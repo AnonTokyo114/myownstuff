@@ -91,7 +91,10 @@ class ResultPanel(QWidget):
         self._numeric = QPlainTextEdit()
         self._numeric.setReadOnly(True)
         self._numeric.setObjectName("numericBox")
-        self._numeric.setFixedHeight(92)
+        # 不能用 setFixedHeight：它同时把**最大**高度也锁成 92，后面按
+        # 内容调 setMinimumHeight 时会被这个上限压制，高阶结果（20 阶
+        # 有 20 多行）就会被父容器裁掉。
+        self._numeric.setMinimumHeight(92)
         layout.addWidget(self._numeric)
 
     # ------------------------------------------------------------------
@@ -703,11 +706,12 @@ class TaylorTab(_BaseTab):
             # 最后再给带 O() 的完整写法，明确截断在哪里。
             try:
                 coeffs = cs.coefficient_list(poly, order, center_text)
-                # 用**解析后**的常量构造基底：直接拼原始字符串会把展开点
-                # "1+1" 变成 (x - 1+1) —— 那其实等于 x，不是 x-2。
+                # 用**解析后**的常量构造基底，而且还要处理它自身是加法
+                # 的情况：str(1 + pi/2) 就是 "1 + pi/2"，直接放在减号后面
+                # 会变成 (x - 1 + pi/2) —— 那等于 x - 1 + pi/2，不是
+                # x - (1 + pi/2)。"1+1" 只是恰好化简成 2 才蒙混过关。
                 center_expr = cs.constant_of(center_text)
-                basis = (var if center_expr == 0
-                         else f"({var} - {center_expr})")
+                basis = cs.basis_text(var, center_expr)
 
                 lines.append("")
                 lines.append("progressive (one more term each order):")
@@ -748,9 +752,17 @@ class TaylorTab(_BaseTab):
         # 按内容行数调数值区高度：累进式是 order 行上下，固定高度会把
         # 最后一行（带 O() 的完整式子）挤到内部滚动区外看不见。
         try:
-            # 不再设上限：行数多了就让文本框长高，由页面滚动条负责，
-            # 而不是让内容在内部滚动时被面板边缘裁掉。
-            self.result._numeric.setMinimumHeight(max(220, 23 * len(lines)))
+            # 不再设上限：行数多了就让文本框长高，由页面滚动条负责。
+            # 行高用字体的实际行距，不写死像素 —— 写死会在不同 DPI /
+            # 字体下差几行，最后一行又被裁掉。
+            metrics = self.result._numeric.fontMetrics()
+            # 乘 2 是必需的，不是保守：QSS 里给 #numericBox 设的 font-size
+            # 不会反映到 widget.font()，所以 fontMetrics().lineSpacing()
+            # 量到的是**旧字体**的行距（约 15px），而实际渲染每行约 28px。
+            # 宁可高一点，也不要差一两行导致最后一行看不见。
+            line_height = int(metrics.lineSpacing() * 2.0)
+            self.result._numeric.setMinimumHeight(
+                max(220, line_height * len(lines) + 28))
             # 高度变了要通知布局，否则 QScrollArea 的滚动范围还是旧的
             self.result._numeric.updateGeometry()
             self.result.updateGeometry()

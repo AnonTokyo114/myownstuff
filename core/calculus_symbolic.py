@@ -348,6 +348,23 @@ def constant_of(value):
     return _sympy_constant(value)
 
 
+def basis_text(var, center_expr):
+    """构造平移基底 ``(var - center)`` 的字符串。
+
+    展开点本身可能是加法（``1 + pi/2``），直接放在减号后面会变
+    ``(x - 1 + pi/2)`` —— 那等于 ``x - 1 + pi/2``，不是 ``x - (1 + pi/2)``。
+    所以这里统一检查并整体加括号。负的展开点写成 ``x + ...``，更易读。
+    """
+    if center_expr == 0:
+        return var
+    text = str(center_expr)
+    if text.startswith("-"):
+        return f"({var} + {text[1:]})"
+    if " " in text or "+" in text:
+        return f"({var} - ({text}))"
+    return f"({var} - {text})"
+
+
 def constant_float(value) -> float:
     """把常量表达式（"pi/2"、"0.5"…）转成 Python 浮点。
 
