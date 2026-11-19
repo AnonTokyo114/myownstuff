@@ -99,5 +99,60 @@ class TestSymbolicFunctions(unittest.TestCase):
         self.assertEqual(txt, "2*n")
 
 
+class TestTaylor(unittest.TestCase):
+    """泰勒展开。"""
+
+    def test_maclaurin_sin(self):
+        txt, latex, _notes = cs.taylor("sin(x)", "x", point=0, order=5)
+        self.assertIn("x**5/120", txt)
+        self.assertIn("x**3/6", txt)
+        self.assertTrue(latex)
+
+    def test_expansion_point_stays_symbolic(self):
+        """在 pi/2 展开必须保留 (x - pi/2)。
+
+        之前在组合常量（"pi/2"）上退回浮点，series() 算出 0 —— 这条
+        用例就是挡那个回归的。
+        """
+        txt, _latex, _notes = cs.taylor("sin(x)", "x", point="pi/2", order=4)
+        self.assertIn("pi/2", txt)
+        self.assertNotEqual(txt.strip(), "0", "展开不能退化成 0")
+
+    def test_nonzero_center_kept(self):
+        txt, _latex, _notes = cs.taylor("exp(x)", "x", point=1, order=3)
+        self.assertIn("x - 1", txt)
+
+    def test_zero_center_is_expanded_not_factored(self):
+        """在 0 处要整理成和式，不能留下 x*(...) 这种因式分解形式。"""
+        txt, _latex, _notes = cs.taylor("log(1+x)", "x", point=0, order=4)
+        self.assertNotIn("*(", txt, f"看起来仍是被分解过的: {txt}")
+
+    def test_early_termination_note(self):
+        """sin 在 0 处偶次项全为 0，展开到 6 阶实际只到 5 阶。"""
+        _txt, _latex, notes = cs.taylor("sin(x)", "x", point=0, order=6)
+        self.assertTrue(any("stops at degree" in n for n in notes), notes)
+
+    def test_infinite_center_rejected(self):
+        with self.assertRaises(cs.SymbolicError):
+            cs.taylor("sin(x)", "x", point="inf", order=3)
+
+    def test_geometric_series(self):
+        txt, _latex, _notes = cs.taylor("1/(1-x)", "x", point=0, order=5)
+        terms = {t.strip() for t in txt.split("+")}
+        self.assertEqual(terms, {"x**5", "x**4", "x**3", "x**2", "x", "1"},
+                         f"意外的项: {terms}")
+
+    def test_pi_bound_stays_exact(self):
+        """回归：组合常量转 sympy 时要保持精确，不能变浮点。"""
+        txt, _latex, _notes = cs.integrate_symbolic(
+            "cos(x)", "x", lower="0", upper="pi/2")
+        self.assertEqual(txt, "1")
+
+    def test_two_pi_bound(self):
+        txt, _latex, _notes = cs.integrate_symbolic(
+            "sin(x)", "x", lower="0", upper="2*pi")
+        self.assertEqual(txt, "0")
+
+
 if __name__ == "__main__":
     unittest.main()

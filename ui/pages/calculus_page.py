@@ -495,6 +495,132 @@ class PartialTab(_BaseTab):
                                 numeric="\n".join(lines))
 
 
+# ====================================================================== 泰勒展开
+class TaylorTab(_BaseTab):
+    """在一点附近把函数展开成多项式。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.expr = _expr_field("e.g.  sin(x)   or  exp(x)   or  1/(1-x)")
+        self.var = _var_field("x")
+        self.assume = _assumption_combo()
+
+        self.center = QLineEdit("0")
+        self.center.setPlaceholderText("e.g. 0, pi/2, 1")
+        self.center.setMinimumWidth(150)
+
+        self.order = QSpinBox()
+        self.order.setRange(0, 20)
+        self.order.setValue(5)
+        self.order.setFixedWidth(70)
+
+        self.check = QLineEdit("")
+        self.check.setPlaceholderText(
+            "optional — compare f and the expansion at this x")
+        self.check.setMinimumWidth(250)
+
+        self.form.addRow("Function", self.expr)
+
+        var_row = QHBoxLayout()
+        var_row.setSpacing(8)
+        var_row.addWidget(self.var)
+        var_row.addWidget(QLabel("Assumption"))
+        var_row.addWidget(self.assume)
+        var_row.addStretch(1)
+        self.form.addRow("Variable", _wrap(var_row))
+
+        pt_row = QHBoxLayout()
+        pt_row.setSpacing(8)
+        pt_row.addWidget(self.center)
+        pt_row.addWidget(QLabel("Order"))
+        pt_row.addWidget(self.order)
+        pt_row.addStretch(1)
+        self.form.addRow("Expand at", _wrap(pt_row))
+
+        chk_row = QHBoxLayout()
+        chk_row.setSpacing(8)
+        chk_row.addWidget(self.check)
+        chk_row.addStretch(1)
+        self.form.addRow("Check at (optional)", _wrap(chk_row))
+
+    def compute(self) -> None:
+        expr = self.expr.text().strip()
+        if not expr:
+            self.result.show_result(error="Please enter a function first")
+            return
+
+        var = self.var.text().strip() or "x"
+        center_text = self.center.text().strip() or "0"
+        order = self.order.value()
+        assumptions = _assumptions_for(self.assume, [var])
+
+        lines: list[str] = []
+        symbolic_text = symbolic_latex = None
+        poly = None
+
+        try:
+            poly, notes = cs.taylor_poly(
+                expr, var, point=center_text, order=order,
+                assumptions=assumptions)
+            symbolic_text = str(poly)
+            symbolic_latex = cs.latex_of(poly)
+            lines.append(f"P_{order}({var}) = {symbolic_text}")
+            for note in notes:
+                lines.append(f"Note: {note}")
+        except Exception as exc:                 # noqa: BLE001
+            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+
+        # 可选的数值对比：原函数和展开式在同一点的差
+        check_text = self.check.text().strip()
+        if check_text and poly is not None:
+            lines.extend(self._compare(expr, var, poly, check_text))
+
+        if symbolic_text is None:
+            self.result.show_result(error="\n".join(lines))
+            return
+        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
+                                numeric="\n".join(lines))
+
+    @staticmethod
+    def _compare(expr: str, var: str, poly, point_text: str) -> list[str]:
+        """把 f 和展开式在给定点各算一遍。"""
+        try:
+            x0 = float(point_text)
+        except ValueError:
+            return [f"Check failed: {point_text!r} is not a number"]
+
+        try:
+            compiled = cn.CompiledExpression(expr, variables=[var])
+            fn = (compiled.function(var) if compiled.variables
+                  else (lambda _x: compiled.evaluate()))
+            actual = complex(fn(x0))
+        except Exception as exc:                 # noqa: BLE001
+            return [f"Check failed (evaluating the function): "
+                    f"{type(exc).__name__}: {exc}"]
+
+        try:
+            syms = poly.free_symbols
+            if len(syms) > 1:
+                return [f"Check skipped: the expansion still contains {syms}"]
+            value = poly if not syms else poly.subs(next(iter(syms)), x0)
+            approx = complex(value)
+        except Exception as exc:                 # noqa: BLE001
+            return [f"Check failed (evaluating the expansion): "
+                    f"{type(exc).__name__}: {exc}"]
+
+        def fmt(z: complex) -> str:
+            if abs(z.imag) <= 1e-12 * max(1.0, abs(z)):
+                return f"{z.real:.12g}"
+            return f"{z.real:.12g} {z.imag:+.6g}i"
+
+        return [
+            "",
+            f"f({x0:g})        = {fmt(actual)}",
+            f"P({x0:g})        = {fmt(approx)}",
+            f"|difference|   = {abs(actual - approx):.3e}",
+        ]
+
+
 # ====================================================================== 页面
 def _wrap(layout: QHBoxLayout) -> QWidget:
     """Wrap a QHBoxLayout in a widget so QFormLayout.addRow can take it."""
@@ -526,9 +652,11 @@ class CalculusPage(QWidget):
         self.integral_tab = IntegralTab()
         self.derivative_tab = DerivativeTab()
         self.partial_tab = PartialTab()
+        self.taylor_tab = TaylorTab()
         tabs.addTab(self.integral_tab, "∫  Integral")
         tabs.addTab(self.derivative_tab, "d/dx  Derivative")
         tabs.addTab(self.partial_tab, "∂  Partial")
+        tabs.addTab(self.taylor_tab, "≈  Taylor")
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

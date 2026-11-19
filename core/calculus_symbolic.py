@@ -35,42 +35,97 @@ _BOUND_SYMBOLS = {
 }
 
 
-def _sympy_bound(value):
-    """把积分边界转成 SymPy 数值。
+def _sympy_constant(value):
+    """把常量表达式解析成 sympy 对象，**保留精确性**。
 
-    不能用 ``sp.Integer()``：``sp.Integer(0.5)`` 会截断成 0，
-    ``sp.Integer(float('inf'))`` 会直接抛错。所以按类型分别处理：
+    ``"0.5"`` -> ``1/2``、``"pi/2"`` -> ``pi/2``、``"2*pi"`` -> ``2*pi``。
 
-      * 字符串 -> 先查符号常量表（pi/e/inf），再试精确有理数（"0.5"/"1/3"），
-        最后走受限 AST 求值（与数值层同一套规则，不用 eval）
-      * float  -> Float 保留精度；±inf 映射到 oo/-oo
+    之前对 "pi/2" 这种组合表达式会退回浮点（``1.5707963...``），
+    拿它当 ``series()`` 的展开点会算出错误结果（sin 在 pi/2 展开成 0）。
+    所以这里用受限 AST 求值，把 pi / e 映射到 sympy 的精确常量。
+
+    不用 ``sympify()``：它会 eval 用户输入。
     """
     sp = _require()
-    if isinstance(value, str):
-        raw = value.strip()
-        table = _BOUND_SYMBOLS.get(raw.lower())
-        if table is not None:
-            return table(sp)
-        # "0.5" / "1/3" 这类按精确有理数处理，避免浮点尾数
-        try:
-            return sp.Rational(raw)
-        except Exception:                            # noqa: BLE001
-            pass
-        from .calculus_numeric import CalculusError, parse_bound
-        try:
-            number = parse_bound(raw)
-        except CalculusError as exc:
-            raise SymbolicError(f"Cannot parse bound {value!r}: {exc}") from exc
-        return sp.Float(number)
 
-    if isinstance(value, float):
-        if math.isinf(value):
-            return sp.oo if value > 0 else -sp.oo
-        if math.isnan(value):
-            raise SymbolicError("Bound is NaN")
-        return sp.Float(value)
+    if not isinstance(value, str):
+        if isinstance(value, bool):
+            raise SymbolicError("A boolean is not a valid constant")
+        if isinstance(value, float):
+            if math.isinf(value):
+                return sp.oo if value > 0 else -sp.oo
+            if math.isnan(value):
+                raise SymbolicError("NaN is not a valid constant")
+            return sp.Float(value)
+        return sp.Integer(int(value))
 
-    return sp.Integer(int(value))
+    raw = value.strip()
+    if not raw:
+        raise SymbolicError("Empty constant")
+
+    # 先查表：处理 "∞" 这种 AST 解析不了（或者很容易搞错减号）的写法
+    table = _BOUND_SYMBOLS.get(raw.lower())
+    if table is not None:
+        return table(sp)
+
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(raw, mode="eval")
+    except SyntaxError as exc:
+        raise SymbolicError(
+            f"Cannot parse constant {value!r}: {exc}") from exc
+
+    def walk(node):
+        if isinstance(node, _ast.Expression):
+            return walk(node.body)
+        if isinstance(node, _ast.Constant):
+            v = node.value
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise SymbolicError("Only numbers are allowed in constants")
+            if isinstance(v, int):
+                return sp.Integer(v)
+            # 用字符串形式转成精确有理数，避免二进制浮点尾数
+            return sp.Rational(str(v))
+        if isinstance(node, _ast.Name):
+            builder = _BOUND_SYMBOLS.get(node.id.lower())
+            if builder is None:
+                raise SymbolicError(f"Unknown name in constant: {node.id!r}")
+            return builder(sp)
+        if isinstance(node, _ast.BinOp):
+            left, right = walk(node.left), walk(node.right)
+            op = type(node.op)
+            if op is _ast.Add:
+                return left + right
+            if op is _ast.Sub:
+                return left - right
+            if op is _ast.Mult:
+                return left * right
+            if op is _ast.Div:
+                return left / right
+            if op is _ast.Pow:
+                return left ** right
+            raise SymbolicError("Unsupported operator in constant")
+        if isinstance(node, _ast.UnaryOp):
+            operand = walk(node.operand)
+            if isinstance(node.op, _ast.UAdd):
+                return operand
+            if isinstance(node.op, _ast.USub):
+                return -operand
+            raise SymbolicError("Unsupported operator in constant")
+        raise SymbolicError(
+            f"Unsupported syntax in constant: {type(node).__name__}")
+
+    return walk(tree)
+
+
+def _sympy_bound(value):
+    """积分上下限 / 泰勒展开点的解析入口。
+
+    保留这个名字是因为 calculus_symbolic 里多处调用；实现已统一到
+    ``_sympy_constant``（精确常量解析）。
+    """
+    return _sympy_constant(value)
 
 
 def available():
@@ -261,6 +316,84 @@ def integrate_symbolic(expr, var="x", lower=None, upper=None, assumptions=None):
         raise SymbolicError("sympy could not find a closed form for this integral")
     simplified = sp.simplify(result)
     return str(simplified), sp.latex(simplified), notes
+
+
+def latex_of(expr) -> str:
+    """把 sympy 表达式转成 LaTeX。
+
+    界面层刻意不 import sympy（没装时也要能给出提示而不是崩），所以走
+    这个函数；转换失败时退回普通字符串，不抛异常。
+    """
+    sp = _require()
+    try:
+        return sp.latex(expr)
+    except Exception:                            # noqa: BLE001
+        return str(expr)
+
+
+def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):
+    """在 point 处把 expr 展开成 order 次多项式。
+
+    返回 ``(sympy 多项式, 说明列表)``。单独暴露这个是为了让界面能拿到
+    表达式对象做数值比较（不必把字符串再解析一遍）。
+
+    point 只支持**常量**（数字、pi、e 之类）—— 符号展开点写出来的式子
+    通常又长又没用，这里不做。
+    """
+    sp = _require()
+    expr_s = _safe_sympify(expr, [var], assumptions)
+    symbol = _make_symbol(var, assumptions)
+    order = max(0, int(order))
+
+    center = _sympy_bound(point)
+    if center.is_finite is False:
+        raise SymbolicError(
+            f"Taylor expansion needs a finite point, got {point!r}")
+
+    try:
+        series = sp.series(expr_s, symbol, center, order + 1)
+    except Exception as exc:                     # noqa: BLE001
+        raise SymbolicError(
+            f"Could not expand {expr!r} at {point!r}: {exc}") from exc
+
+    # removeO() 去掉尾部的 O(x**n)。
+    #
+    # 在 0 处展开时用 expand 整理成 x 的降幂和式 —— 否则 sympy 可能给出
+    # x*(-x**3/4 + x**2/3 - x/2 + 1) 这种因式分解形式，看起来不像泰勒多项式。
+    #
+    # 非零展开点则**不展开**：series() 给出的是 (x - a) 的幂次，展开成
+    # x 的多项式会糊掉「在 a 处展开」这件事，式子也变得又长又难读。
+    poly = series.removeO()
+    if center == 0:
+        poly = sp.expand(poly)
+
+    notes = []
+    if poly.has(sp.Integral) or poly.has(sp.Derivative):
+        raise SymbolicError(
+            "sympy could not produce a finite expansion for this function")
+    # 多项式提前终止（例如 sin 的偶次项都是 0）时说明一下，
+    # 免得用户以为漏算了。
+    # 注意 sp.degree() 返回的是 sympy 的 Integer，不是 Python int，
+    # 用 isinstance(degree, int) 判断会永远为假（这个坑踩过一次）。
+    try:
+        raw_degree = sp.degree(poly, symbol)
+        degree = int(raw_degree) if raw_degree is not None else None
+    except Exception:                            # noqa: BLE001
+        degree = None
+    if degree is not None and degree < order:
+        notes.append(
+            f"the series stops at degree {degree} "
+            "(the next derivative vanishes at this point)")
+    if center != 0:
+        notes.append(f"expanded about {var} = {center}")
+    return poly, notes
+
+
+def taylor(expr, var="x", point=0, order=5, assumptions=None):
+    """泰勒展开，返回 (多项式字符串, LaTeX, 说明列表)。"""
+    sp = _require()
+    poly, notes = taylor_poly(expr, var, point, order, assumptions)
+    return str(poly), sp.latex(poly), notes
 
 
 def partial(expr, variables, var, order=1, cross_var=None, assumptions=None):

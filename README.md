@@ -228,7 +228,7 @@ research-gui/
 │   ├── expr_eval.py         表达式求值（AST 白名单，绝不 eval）
 │   ├── latex_render.py      LaTeX -> 透明 PNG
 │   ├── calculus_numeric.py  数值积分 / 导数 / 偏导（复数安全）
-│   ├── calculus_symbolic.py 符号积分 / 求导（sympy，带变量假设）
+│   ├── calculus_symbolic.py 符号积分 / 求导 / 泰勒展开（sympy，带变量假设）
 │   ├── optics/              光学物理核心（光线追迹、焦距、光斑、球差）
 │   ├── eigencalc.py         特征值 / 特征函数 / 矩阵运算
 │   ├── csvdata.py           CSV 读取与绘图
@@ -253,7 +253,7 @@ research-gui/
     ├── widgets/             device_selector.py 等复用组件
     └── pages/
         ├── home_page.py        首页（标题 + 功能卡片）
-        ├── calculus_page.py    微积分（积分 / 导数 / 偏导）
+        ├── calculus_page.py    微积分（积分 / 导数 / 偏导 / 泰勒展开）
         ├── formula_page.py     公式渲染
         ├── ray_page.py         光线追迹（光线图 / 像质分析）
         ├── matrix_page.py      矩阵计算器（4 个标签页）
