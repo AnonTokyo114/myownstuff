@@ -339,6 +339,15 @@ def latex_of(expr) -> str:
         return str(expr)
 
 
+def constant_of(value):
+    """把常量表达式解析成 sympy 对象。
+
+    界面用它构造平移基底：展开点写 "1+1" 时必须得到 2，直接拼原始
+    字符串会拼出 (x - 1+1) —— 那等于 x，不是 x-2。
+    """
+    return _sympy_constant(value)
+
+
 def constant_float(value) -> float:
     """把常量表达式（"pi/2"、"0.5"…）转成 Python 浮点。
 
@@ -520,7 +529,16 @@ def format_polynomial(coeffs, basis="x"):
             body = str(magnitude)
         else:
             variable = basis if power == 1 else f"{basis}**{power}"
-            body = variable if magnitude == 1 else f"{magnitude}*{variable}"
+            if magnitude == 1:
+                body = variable
+            else:
+                coeff_text = str(magnitude)
+                # 系数本身是加法时必须整体括起来：exp(x)+x 在 1 处的一阶
+                # 系数是 1+E，不括起来会拼成 "1 + E + 1 + E*(x - 1)"，
+                # 在 x=1 处算出来是 2+E，而不是正确的 1+E。
+                if " " in coeff_text or "+" in coeff_text:
+                    coeff_text = f"({coeff_text})"
+                body = f"{coeff_text}*{variable}"
         parts.append((negative, body))
 
     if not parts:
@@ -598,47 +616,77 @@ def _validate_taylor(expr_s, symbol, poly, center, order):
                 "No Taylor polynomial exists at this point: the expansion "
                 "contains a negative or fractional power.")
 
-    # 数值验证：泰勒展开要求 f 在展开点**可导**。
+    # 导数存在性：用**符号求导**逐阶核验，而不是固定步长的差商。
     #
-    # 判据是「左右导数一致」，而不是「误差大小」：abs(x) 在 0 处左导 -1、
-    # 右导 +1。不用误差判据是因为它判不出高频函数 ——
-    # x + sin(800*pi*x/3)**2 的 1 阶展开确实是 x，但 x=1e-3 处 sin^2 项
-    # 已经贡献 0.55，看起来像「误差很大」，其实展开是对的。
+    # 差商在浮点下不可靠：步长大时高阶项盖过一阶项，步长小时被舍入
+    # 误差淹没，而且它只能"看到一个"，没法按所需阶数逐一确认。
     #
-    # 多个步长都要试：大步长下高阶项的贡献会盖过一阶项。
-    try:
-        import numpy as np
-
-        f = sp.lambdify(symbol, expr_s, modules="numpy")
-        c = float(center)
-        evaluated = False
-        symmetric = False
-        for h in (1e-6, 1e-8, 1e-10):
-            step = h * max(1.0, abs(c))
-            if step <= 0:
-                continue
-            try:
-                f0 = complex(f(c))
-                left_slope = (f0 - complex(f(c - step))) / step
-                right_slope = (complex(f(c + step)) - f0) / step
-            except Exception:                    # noqa: BLE001
-                continue
-            evaluated = True
-            if not (np.isfinite(left_slope) and np.isfinite(right_slope)):
-                continue
-            magnitude = max(1.0, abs(left_slope), abs(right_slope))
-            if abs(left_slope - right_slope) <= 1e-3 * magnitude:
-                symmetric = True
-                break
-        if evaluated and not symmetric:
+    # 判据：f^(k)(center) 对 k = 0..order 必须有限；遇到 abs/sign 这类
+    # 分段函数时再比较**左右极限**（abs 在 0 处左导 -1、右导 +1）。
+    # 无法判定时明确说"无法确认"，不武断声称不存在。
+    suspicious = (sp.Abs, sp.sign, sp.Piecewise, sp.Min, sp.Max,
+                  sp.floor, sp.ceiling)
+    for k in range(max(1, order + 1)):
+        try:
+            deriv = sp.diff(expr_s, symbol, k)
+        except Exception as exc:                 # noqa: BLE001
             raise SymbolicError(
-                "No Taylor polynomial exists at this point: the left and "
-                "right derivatives disagree. Functions like abs(x) are not "
-                "differentiable there, so only a one-sided series exists.")
-    except SymbolicError:
-        raise
-    except Exception:                            # noqa: BLE001
-        pass          # lambdify 失败就跳过数值验证，不因此拒绝
+                f"Cannot determine whether the {k}-th derivative exists at "
+                f"this point: differentiation failed ({exc}).") from exc
+
+        at_point = None
+        try:
+            at_point = deriv.subs(symbol, center)
+        except Exception:                        # noqa: BLE001
+            at_point = None
+
+        if at_point is not None:
+            if at_point.has(sp.zoo) or at_point.has(sp.nan):
+                raise SymbolicError(
+                    f"No Taylor polynomial exists at this point: the {k}-th "
+                    "derivative is undefined here.")
+            if at_point.is_finite is False:
+                raise SymbolicError(
+                    f"No Taylor polynomial exists at this point: the {k}-th "
+                    "derivative is infinite here.")
+
+        # 含分段函数 / 绝对值时，单点取值可能是 sympy 的约定值
+        # （sign(0) = 0），必须靠左右极限确认
+        needs_limit = (
+            at_point is None
+            or at_point.has(*suspicious)
+            or deriv.has(*suspicious)
+        )
+        if not needs_limit:
+            continue
+
+        try:
+            left = sp.limit(deriv, symbol, center, "-")
+            right = sp.limit(deriv, symbol, center, "+")
+        except Exception as exc:                 # noqa: BLE001
+            raise SymbolicError(
+                f"Cannot confirm the {k}-th derivative at this point: the "
+                f"one-sided limits could not be computed ({exc}). Refusing "
+                "to claim a Taylor polynomial exists.") from exc
+
+        if left is None or right is None:
+            raise SymbolicError(
+                f"Cannot confirm the {k}-th derivative at this point: the "
+                "one-sided limits are unavailable.")
+        if not (left.is_finite and right.is_finite):
+            raise SymbolicError(
+                f"No Taylor polynomial exists at this point: the {k}-th "
+                "derivative is infinite on at least one side.")
+        try:
+            same = sp.simplify(left - right) == 0
+        except Exception:                        # noqa: BLE001
+            same = (left == right)
+        if not same:
+            raise SymbolicError(
+                f"No Taylor polynomial exists at this point: the {k}-th "
+                f"derivative has different one-sided limits "
+                f"({left} on the left, {right} on the right)."
+            )
 
 
 def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):

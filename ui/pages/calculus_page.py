@@ -703,9 +703,11 @@ class TaylorTab(_BaseTab):
             # 最后再给带 O() 的完整写法，明确截断在哪里。
             try:
                 coeffs = cs.coefficient_list(poly, order, center_text)
-                raw_center = center_text.strip()
-                basis = (var if raw_center in ("", "0", "0.0", "+0")
-                         else f"({var} - {raw_center})")
+                # 用**解析后**的常量构造基底：直接拼原始字符串会把展开点
+                # "1+1" 变成 (x - 1+1) —— 那其实等于 x，不是 x-2。
+                center_expr = cs.constant_of(center_text)
+                basis = (var if center_expr == 0
+                         else f"({var} - {center_expr})")
 
                 lines.append("")
                 lines.append("progressive (one more term each order):")
@@ -743,9 +745,8 @@ class TaylorTab(_BaseTab):
                 except Exception as exc:         # noqa: BLE001
                     lines.append(f"Plot failed: {type(exc).__name__}: {exc}")
 
-        # 按内容行数调数值区高度：累进式是 order+3 行上下，固定高度会把
+        # 按内容行数调数值区高度：累进式是 order 行上下，固定高度会把
         # 最后一行（带 O() 的完整式子）挤到内部滚动区外看不见。
-        # 上限 420px，再多就交给内部滚动条。
         try:
             # 不再设上限：行数多了就让文本框长高，由页面滚动条负责，
             # 而不是让内容在内部滚动时被面板边缘裁掉。
@@ -848,7 +849,7 @@ class CalculusPage(QWidget):
         # 底部留一大段空：内容高度是动态的（LaTeX 图 + 累进式列表 + 结果
         # 面板），布局更新有延迟，滚动范围算小一点点最后一行就会被窗口
         # 边缘裁掉。宁可多留白也不要被裁。
-        holder_layout.setContentsMargins(0, 0, 0, 600)
+        holder_layout.setContentsMargins(0, 0, 0, 200)
         holder_layout.addWidget(tabs)
         scroll.setWidget(holder)
 

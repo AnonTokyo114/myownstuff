@@ -283,6 +283,80 @@ class TestTaylor(unittest.TestCase):
             coeffs = cs.coefficient_list(poly, order, 0)
             self.assertEqual(len(coeffs), order + 1)
 
+    # ---- 导数存在性：按阶数核验，不当成"一律拒绝" ----
+    def test_x_abs_x_order_1_ok(self):
+        """x|x| 在 0 处一阶可导（展开是 0），二阶不可导。"""
+        txt, _latex, _notes = cs.taylor("x*abs(x)", "x", point=0, order=1)
+        self.assertEqual(txt, "0")
+        with self.assertRaises(cs.SymbolicError):
+            cs.taylor("x*abs(x)", "x", point=0, order=2)
+
+    def test_abs_rejected_at_any_order(self):
+        """abs 在 0 处连一阶导数都没有。"""
+        for order in (1, 2, 5):
+            with self.assertRaises(cs.SymbolicError, msg=str(order)):
+                cs.taylor("abs(x)", "x", point=0, order=order)
+
+    def test_smooth_functions_pass(self):
+        """正例：平滑函数不能因为校验过严被拒。"""
+        for expr in ("x**2", "sin(x)", "exp(x)", "1/(1-x)", "sqrt(1+x)",
+                     "tan(x)", "exp(x)+x"):
+            txt, _latex, _notes = cs.taylor(expr, "x", point=0, order=3)
+            self.assertTrue(txt, f"{expr} 应该有结果")
+
+    def test_abs_at_one_still_fine(self):
+        """abs 在 1 附近是光滑的，展开合法。"""
+        txt, _latex, _notes = cs.taylor("abs(x)", "x", point=1, order=3)
+        self.assertTrue(txt)
+
+    # ---- 复合系数加括号 ----
+    def test_sum_coefficient_gets_parentheses(self):
+        """exp(x)+x 在 1 处的一阶系数是 1+E，必须整体括起来。
+
+        不括起来会拼成 "1 + E + 1 + E*(x - 1)"，在 x=1 处算出 2+E，
+        而正确值是 1+E。
+        """
+        poly, _notes = cs.taylor_poly("exp(x)+x", "x", point=1, order=1)
+        coeffs = cs.coefficient_list(poly, 1, 1)
+        self.assertEqual([str(c) for c in coeffs], ["1 + E", "1 + E"])
+        text = cs.format_polynomial(coeffs, "(x - 1)")
+        self.assertIn("(1 + E)*(x - 1)", text)
+        self.assertNotIn("E*(x - 1) + 1 + E", text)
+
+    def test_formatted_text_is_algebraically_equivalent(self):
+        """格式化结果必须和多项式本身代数等价（不能只看字符串）。"""
+        sp = cs._require()
+        symbol = sp.Symbol("x")
+        for expr, center, order in (("exp(x)+x", 1, 1), ("sin(x)", 0, 5),
+                                    ("exp(x)", 1, 3), ("1/(1+x)", 0, 4)):
+            poly, _notes = cs.taylor_poly(expr, "x", point=center, order=order)
+            text = cs.format_polynomial(
+                cs.coefficient_list(poly, order, center),
+                "x" if not center else "(x - %s)" % center)
+            parsed = sp.sympify(text)
+            expected = sp.expand(poly)
+            # 用几个数值点比较，避免依赖 simplify 的符号等价判断
+            # poly 里的符号带 assumptions，和 sympify 出来的普通 x 不是
+            # 同一个对象 —— 替换要各用各的，否则 subs 不生效
+            inner = next(iter(poly.free_symbols))
+            for probe in (0.37, 1.0, 2.13):
+                got = complex(parsed.subs(symbol, probe))
+                want = complex(expected.subs(inner, probe))
+                self.assertAlmostEqual(abs(got - want), 0.0, places=9,
+                                       msg=f"{expr}: {text}")
+
+    # ---- 展开点写成算式 ----
+    def test_center_expression_parsed(self):
+        self.assertEqual(str(cs.constant_of("1+1")), "2")
+        self.assertEqual(str(cs.constant_of("pi/2")), "pi/2")
+        self.assertEqual(str(cs.constant_of("0")), "0")
+
+    def test_center_expression_taylor_matches_parsed_value(self):
+        """展开点 "1+1" 和 "2" 必须给出同一个展开。"""
+        a = cs.taylor("exp(x)", "x", point="1+1", order=2)[0]
+        b = cs.taylor("exp(x)", "x", point="2", order=2)[0]
+        self.assertEqual(a, b)
+
     # ---- 升幂格式化 ----
     def test_format_polynomial_ascending(self):
         poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=4)
