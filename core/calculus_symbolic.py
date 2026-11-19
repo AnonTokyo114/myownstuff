@@ -395,24 +395,24 @@ def _sampled_grid(center, span, count, phase):
     """第 phase 张采样网格。
 
     phase 0 是纯等距；其它相位加**确定性抖动**（可复现），用来打破周期性
-    混叠。等距网格很容易和振荡函数的周期同步 —— 例如
-    ``sin(800*pi*x/3)**2`` 在 [-1.5, 1.5] 上取 801 点，步长正好是半个
-    周期，每个采样点都落在零点附近，于是报出一个大得离谱的区间。
+    混叠 —— 等距网格很容易和振荡函数的周期同步。
+
+    每张网格都**显式包含精确的展开点**：抖动会把最近的采样点推离
+    center，两侧端点就可能都落在同一侧，算出负的半径。
     """
     import numpy as np
 
     base = np.linspace(center - span, center + span, count)
-    if count < 2:
-        return base
-    step = base[1] - base[0]
-    if phase == 0 or step <= 0:
-        return base
-    rng = np.random.default_rng(1234 + phase)
-    jitter = rng.uniform(-0.45, 0.45, count) * step
-    return np.clip(base + jitter, center - span, center + span)
+    if count >= 2 and phase > 0:
+        step = base[1] - base[0]
+        if step > 0:
+            rng = np.random.default_rng(1234 + phase)
+            jitter = rng.uniform(-0.45, 0.45, count) * step
+            base = np.clip(base + jitter, center - span, center + span)
+    return np.unique(np.concatenate(([center], base)))
 
 
-def _hold_once(expr, var, poly, center, tolerance, xs):
+def _hold_once(expr, var, poly, center, tolerance, xs, span):
     """在一张网格上，从展开点向两边走到误差超限为止。"""
     import numpy as np
 
@@ -428,19 +428,56 @@ def _hold_once(expr, var, poly, center, tolerance, xs):
     while (right < len(xs) - 1 and np.isfinite(err[right + 1])
            and err[right + 1] < tolerance):
         right += 1
-    return (min(center - xs[left], xs[right] - center),
-            float(xs[left]), float(xs[right]))
+
+    # 端点必须分居展开点两侧。不分居说明最近的可行采样点被推到一边了，
+    # 那是分辨率不够，不能当成「紧挨着就超差」。
+    if not (xs[left] <= center <= xs[right]):
+        return 0.0, center, center
+
+    radius = min(center - xs[left], xs[right] - center)
+    if radius > 0:
+        return max(0.0, float(radius)), float(xs[left]), float(xs[right])
+
+    # 半径 0 有两种可能：误差真的紧挨着就超了，或者有效窗口比采样步长
+    # 还窄。在中心附近逐级加密再试 —— 能分辨这两种情况，也能测出
+    # exp(x) 展开到 0 阶这种「窗口只有 ±0.001」的例子。
+    for fraction in (0.25, 0.02, 0.002, 0.0002):
+        width = span * fraction
+        if width <= 0:
+            continue
+        fine = np.unique(np.concatenate(
+            ([center], np.linspace(center - width, center + width, 401))))
+        fine_err = _error_curve(expr, var, poly, fine)
+        k = int(np.argmin(np.abs(fine - center)))
+        if not np.isfinite(fine_err[k]) or fine_err[k] >= tolerance:
+            break
+        lo_i = k
+        while (lo_i > 0 and np.isfinite(fine_err[lo_i - 1])
+               and fine_err[lo_i - 1] < tolerance):
+            lo_i -= 1
+        hi_i = k
+        while (hi_i < len(fine) - 1 and np.isfinite(fine_err[hi_i + 1])
+               and fine_err[hi_i + 1] < tolerance):
+            hi_i += 1
+        if not (fine[lo_i] <= center <= fine[hi_i]):
+            continue
+        fine_radius = max(0.0, min(center - fine[lo_i], fine[hi_i] - center))
+        if fine_radius > 0:
+            return float(fine_radius), float(fine[lo_i]), float(fine[hi_i])
+
+    return 0.0, center, center
 
 
 def expansion_holds(expr, var, poly, point, tolerance=1e-6,
                     span=None, samples=801, grids=4):
     """数值估计展开式在多大范围内还够准。
 
-    返回 ``(radius, left, right, spread)``：
+    返回 ``(radius, left, right, spread, step)``：
 
-      * ``radius`` —— 从展开点向两侧走到误差超过 tolerance 的距离
-      * ``left`` / ``right`` —— 对应的区间端点
+      * ``radius`` —— 从展开点向两侧走到误差超过 tolerance 的距离（>= 0）
+      * ``left`` / ``right`` —— 对应的区间端点，保证 ``left <= point <= right``
       * ``spread`` —— 各张网格给出的半径之间的最大差值
+      * ``step`` —— 最细网格的采样间距，用来判断分辨率
 
     .. warning:: **这是采样估计，不是保证的上界。**
 
@@ -453,14 +490,91 @@ def expansion_holds(expr, var, poly, point, tolerance=1e-6,
         span = max(1.0, abs(center)) * 1.5
 
     results = []
+    steps = []
     for phase in range(max(1, grids)):
         count = samples + 8 * phase
         xs = _sampled_grid(center, span, count, phase)
-        results.append(_hold_once(expr, var, poly, center, tolerance, xs))
+        steps.append(float(xs[1] - xs[0]) if len(xs) > 1 else float(span))
+        results.append(_hold_once(expr, var, poly, center, tolerance, xs, span))
 
     radius, left, right = min(results, key=lambda r: r[0])
     spread = max(r[0] for r in results) - min(r[0] for r in results)
-    return radius, left, right, spread
+    return radius, left, right, spread, (min(steps) if steps else float(span))
+
+
+def _validate_taylor(expr_s, symbol, poly, center, order):
+    """确认 poly 真的是 expr 在 center 处的 order 阶泰勒多项式。
+
+    单看「是不是多项式」不够：sympy 对 ``abs(x)`` 在 0 处会给出 ``x``，
+    那是**单侧**展开，不是泰勒多项式。所以还要数值比一下展开点两侧。
+
+    拒绝的情况：
+
+      * 结果不是多项式（``1/x``、``log(x)``、``sqrt(x)`` —— 极点或分支点）
+      * 幂次不是非负整数
+      * 只在展开点一侧吻合（``abs(x)`` 这类不可导点）
+    """
+    sp = _require()
+
+    if not poly.is_polynomial(symbol):
+        raise SymbolicError(
+            "No Taylor polynomial exists at this point: the expansion is not "
+            "a polynomial (the function likely has a pole or a branch point "
+            "there).")
+
+    try:
+        poly_obj = sp.Poly(poly, symbol)
+    except Exception as exc:                     # noqa: BLE001
+        raise SymbolicError(
+            f"Cannot interpret the expansion as a polynomial: {exc}") from exc
+    for monom in poly_obj.monoms():
+        exponent = monom[0] if monom else 0
+        if not isinstance(exponent, int) or exponent < 0:
+            raise SymbolicError(
+                "No Taylor polynomial exists at this point: the expansion "
+                "contains a negative or fractional power.")
+
+    # 数值验证：泰勒展开要求 f 在展开点**可导**。
+    #
+    # 判据是「左右导数一致」，而不是「误差大小」：abs(x) 在 0 处左导 -1、
+    # 右导 +1。不用误差判据是因为它判不出高频函数 ——
+    # x + sin(800*pi*x/3)**2 的 1 阶展开确实是 x，但 x=1e-3 处 sin^2 项
+    # 已经贡献 0.55，看起来像「误差很大」，其实展开是对的。
+    #
+    # 多个步长都要试：大步长下高阶项的贡献会盖过一阶项。
+    try:
+        import numpy as np
+
+        f = sp.lambdify(symbol, expr_s, modules="numpy")
+        c = float(center)
+        evaluated = False
+        symmetric = False
+        for h in (1e-6, 1e-8, 1e-10):
+            step = h * max(1.0, abs(c))
+            if step <= 0:
+                continue
+            try:
+                f0 = complex(f(c))
+                left_slope = (f0 - complex(f(c - step))) / step
+                right_slope = (complex(f(c + step)) - f0) / step
+            except Exception:                    # noqa: BLE001
+                continue
+            evaluated = True
+            if not (np.isfinite(left_slope) and np.isfinite(right_slope)):
+                continue
+            magnitude = max(1.0, abs(left_slope), abs(right_slope))
+            if abs(left_slope - right_slope) <= 1e-3 * magnitude:
+                symmetric = True
+                break
+        if evaluated and not symmetric:
+            raise SymbolicError(
+                "No Taylor polynomial exists at this point: the left and "
+                "right derivatives disagree. Functions like abs(x) are not "
+                "differentiable there, so only a one-sided series exists.")
+    except SymbolicError:
+        raise
+    except Exception:                            # noqa: BLE001
+        pass          # lambdify 失败就跳过数值验证，不因此拒绝
 
 
 def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):
@@ -498,6 +612,8 @@ def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):
     poly = series.removeO()
     if center == 0:
         poly = sp.expand(poly)
+
+    _validate_taylor(expr_s, symbol, poly, center, order)
 
     notes = []
     if poly.has(sp.Integral) or poly.has(sp.Derivative):

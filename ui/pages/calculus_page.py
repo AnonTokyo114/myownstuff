@@ -642,7 +642,7 @@ class TaylorTab(_BaseTab):
 
         notes: list[str] = []
         try:
-            radius, lo, hi, spread = cs.expansion_holds(
+            radius, lo, hi, spread, step = cs.expansion_holds(
                 expr, var, poly, center_value, tolerance=tol)
             if radius > 0:
                 notes.append(
@@ -650,9 +650,12 @@ class TaylorTab(_BaseTab):
                     f"|{var} - {center_value:g}| < {radius:.3g}  "
                     f"({var} in [{lo:.3g}, {hi:.3g}])")
             else:
+                # 半径 0 有两种可能，不能一律说成「紧挨着就超差」
                 notes.append(
-                    f"sampled: the error exceeds {tol:g} immediately next to "
-                    "the expansion point")
+                    f"sampled: no sampled point within {step:.2g} of the "
+                    f"expansion point stays under {tol:g} — the valid window "
+                    "is either narrower than the sampling step or the error "
+                    "really does exceed the tolerance right away")
             # 各网格给出的半径差得远，说明函数变化比采样快，只能当参考
             if spread > max(0.05, 0.3 * max(radius, 1e-12)):
                 notes.append(

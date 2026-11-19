@@ -192,7 +192,7 @@ class TestTaylor(unittest.TestCase):
         """
         expr = "x + sin(800*pi*x/3)**2"
         poly, _notes = cs.taylor_poly(expr, "x", point=0, order=1)
-        radius, _lo, _hi, spread = cs.expansion_holds(
+        radius, _lo, _hi, spread, _step = cs.expansion_holds(
             expr, "x", poly, 0, tolerance=1e-3, grids=2)
         self.assertLess(radius, 1.0, f"半径不该是 {radius}（混叠没修好）")
         self.assertGreater(spread, 0.05,
@@ -215,10 +215,70 @@ class TestTaylor(unittest.TestCase):
     def test_constant_expansion_holds_everywhere(self):
         """零误差的展开式，整个采样范围都算有效。"""
         poly, _notes = cs.taylor_poly("3", "x", point=0, order=5)
-        radius, _lo, _hi, _spread = cs.expansion_holds(
+        radius, _lo, _hi, _spread, _step = cs.expansion_holds(
             "3", "x", poly, 0, tolerance=1e-3,
             samples=201, grids=1)
         self.assertGreater(radius, 1.0)
+
+    # ---- 泰勒多项式的合法性 ----
+    def test_rejects_pole_and_branch_point(self):
+        """极点 / 分支点处的「展开」其实还是原函数，必须拒绝。"""
+        for expr in ("1/x", "log(x)", "sqrt(x)"):
+            with self.assertRaises(cs.SymbolicError, msg=expr):
+                cs.taylor(expr, "x", point=0, order=5)
+
+    def test_rejects_abs_at_zero(self):
+        """abs(x) 在 0 处不可导，sympy 会给出单侧的 x，不是泰勒多项式。"""
+        with self.assertRaises(cs.SymbolicError):
+            cs.taylor("abs(x)", "x", point=0, order=5)
+
+    def test_abs_away_from_zero_is_fine(self):
+        """abs(x) 在 1 附近就是 x，展开完全合法。"""
+        txt, _latex, _notes = cs.taylor("abs(x)", "x", point=1, order=3)
+        self.assertTrue(txt)
+
+    def test_oscillatory_function_is_still_valid(self):
+        """高频函数不能被合法性检查误伤（它的 1 阶展开确实是 x）。"""
+        txt, _latex, _notes = cs.taylor(
+            "x + sin(800*pi*x/3)^2", "x", point=0, order=1)
+        self.assertEqual(txt, "x")
+
+    def test_high_order_standard_functions_pass(self):
+        """高阶正常函数不能被浮点噪声误判成单侧展开。"""
+        for expr, order in (("1/(1-x)", 5), ("exp(x)", 3), ("cos(x)", 6),
+                            ("tan(x)", 5), ("3", 5)):
+            txt, _latex, _notes = cs.taylor(expr, "x", point=0, order=order)
+            self.assertTrue(txt, f"{expr} 应该有结果")
+
+    # ---- 采样区间的数值卫生 ----
+    def test_radius_never_negative(self):
+        """抖动采样曾经算出负半径，把展开点排除在区间外。"""
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=0)
+        radius, _lo, _hi, _spread, step = cs.expansion_holds(
+            "exp(x)", "x", poly, 0, tolerance=1e-3)
+        self.assertGreaterEqual(radius, 0.0, f"半径不该是 {radius}")
+        self.assertGreater(step, 0.0)
+
+    def test_radius_brackets_the_center(self):
+        """端点必须分居展开点两侧。"""
+        for expr, order, tol in (("sin(x)", 5, 1e-3), ("exp(x)", 3, 1e-3),
+                                 ("3", 5, 1e-3)):
+            poly, _notes = cs.taylor_poly(expr, "x", point=0, order=order)
+            _r, lo, hi, _spread, _step = cs.expansion_holds(
+                expr, "x", poly, 0, tolerance=tol)
+            self.assertLessEqual(lo, 0.0, f"{expr}: 左端点在展开点右侧")
+            self.assertGreaterEqual(hi, 0.0, f"{expr}: 右端点在展开点左侧")
+
+    def test_narrow_window_is_resolved(self):
+        """exp(x) 展开到 0 阶时，有效窗口只有 ±0.001，比默认步长还窄。
+
+        早期实现会算成 0（「紧挨着就超差」），其实只是网格太粗。
+        """
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=0)
+        radius, _lo, _hi, _spread, _step = cs.expansion_holds(
+            "exp(x)", "x", poly, 0, tolerance=1e-3)
+        self.assertGreater(radius, 1e-4, f"应该能测出窄窗口，得到 {radius}")
+        self.assertLess(radius, 1e-2)
 
     # ---- 常量精度 ----
     def test_decimal_precision_preserved(self):
