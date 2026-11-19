@@ -747,8 +747,13 @@ class TaylorTab(_BaseTab):
         # 最后一行（带 O() 的完整式子）挤到内部滚动区外看不见。
         # 上限 420px，再多就交给内部滚动条。
         try:
-            self.result._numeric.setMinimumHeight(
-                min(420, max(220, 21 * len(lines))))
+            # 不再设上限：行数多了就让文本框长高，由页面滚动条负责，
+            # 而不是让内容在内部滚动时被面板边缘裁掉。
+            self.result._numeric.setMinimumHeight(max(220, 23 * len(lines)))
+            # 高度变了要通知布局，否则 QScrollArea 的滚动范围还是旧的
+            self.result._numeric.updateGeometry()
+            self.result.updateGeometry()
+            self.updateGeometry()
         except Exception:                        # noqa: BLE001
             pass
 
@@ -840,8 +845,10 @@ class CalculusPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         holder = QWidget()
         holder_layout = QVBoxLayout(holder)
-        # 底部留一点空：滚到底时最后一行的下沿不会被窗口边缘裁掉
-        holder_layout.setContentsMargins(0, 0, 0, 14)
+        # 底部留一大段空：内容高度是动态的（LaTeX 图 + 累进式列表 + 结果
+        # 面板），布局更新有延迟，滚动范围算小一点点最后一行就会被窗口
+        # 边缘裁掉。宁可多留白也不要被裁。
+        holder_layout.setContentsMargins(0, 0, 0, 600)
         holder_layout.addWidget(tabs)
         scroll.setWidget(holder)
 
