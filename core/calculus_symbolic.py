@@ -85,7 +85,15 @@ def _sympy_constant(value):
                 raise SymbolicError("Only numbers are allowed in constants")
             if isinstance(v, int):
                 return sp.Integer(v)
-            # 用字符串形式转成精确有理数，避免二进制浮点尾数
+            # 用**原始源文本**转有理数。ast.parse 已经把
+            # 1.0000000000000001 变成了 float 1.0，从 node.value 里拿不回
+            # 原来的位数 —— 那会让积分边界这类输入悄悄丢精度。
+            segment = _ast.get_source_segment(raw, node)
+            if segment:
+                try:
+                    return sp.Rational(segment)
+                except Exception:                # noqa: BLE001
+                    pass
             return sp.Rational(str(v))
         if isinstance(node, _ast.Name):
             builder = _BOUND_SYMBOLS.get(node.id.lower())
@@ -353,26 +361,15 @@ def lambdify_of(expr):
     return sp.lambdify(syms, expr, modules="numpy")
 
 
-def expansion_holds(expr, var, poly, point, tolerance=1e-6,
-                    span=None, samples=801):
-    """数值估计展开式在多大范围内还够准。
+def _error_curve(expr, var, poly, xs):
+    """在给定点上算 ``|f - P|``。
 
-    返回 ``(radius, left, right)``：从展开点向两侧找，最后一个满足
-    ``|f(x) - P(x)| < tolerance`` 的位置。
-
-    这是**数值探测**，不是严格的收敛半径 —— 物理上更关心「在我的工作
-    区间里够不够准」，这个问法更实用（也顺带能发现奇点）。
+    标量结果（常数函数 / 常数多项式）要广播到 xs 的形状，否则绘图和
+    误差比较会因为 (601,) 与 () 维度不一致而报错。
     """
-    sp = _require()
     import numpy as np
 
     from .expr_eval import CompiledExpression
-
-    center = float(point)
-    if span is None:
-        span = max(1.0, abs(center)) * 1.5
-
-    xs = np.linspace(center - span, center + span, samples)
 
     compiled = CompiledExpression(expr, variables=[var])
     fn = (compiled.function(var) if compiled.variables
@@ -381,15 +378,45 @@ def expansion_holds(expr, var, poly, point, tolerance=1e-6,
         f_vals = np.asarray(fn(xs), dtype=complex)
     except Exception:                            # noqa: BLE001
         f_vals = np.array([complex(fn(x)) for x in xs], dtype=complex)
+    if f_vals.shape != xs.shape:
+        f_vals = np.broadcast_to(f_vals, xs.shape)
 
-    syms = sorted(getattr(poly, "free_symbols", ()), key=str)
-    if len(syms) == 1:
-        p_vals = np.asarray(sp.lambdify(syms, poly, modules="numpy")(xs),
-                            dtype=complex)
+    if getattr(poly, "free_symbols", None):
+        p_vals = np.asarray(lambdify_of(poly)(xs), dtype=complex)
+        if p_vals.shape != xs.shape:
+            p_vals = np.broadcast_to(p_vals, xs.shape)
     else:
         p_vals = np.full(xs.shape, complex(poly), dtype=complex)
 
-    err = np.abs(f_vals - p_vals)
+    return np.abs(f_vals - p_vals)
+
+
+def _sampled_grid(center, span, count, phase):
+    """第 phase 张采样网格。
+
+    phase 0 是纯等距；其它相位加**确定性抖动**（可复现），用来打破周期性
+    混叠。等距网格很容易和振荡函数的周期同步 —— 例如
+    ``sin(800*pi*x/3)**2`` 在 [-1.5, 1.5] 上取 801 点，步长正好是半个
+    周期，每个采样点都落在零点附近，于是报出一个大得离谱的区间。
+    """
+    import numpy as np
+
+    base = np.linspace(center - span, center + span, count)
+    if count < 2:
+        return base
+    step = base[1] - base[0]
+    if phase == 0 or step <= 0:
+        return base
+    rng = np.random.default_rng(1234 + phase)
+    jitter = rng.uniform(-0.45, 0.45, count) * step
+    return np.clip(base + jitter, center - span, center + span)
+
+
+def _hold_once(expr, var, poly, center, tolerance, xs):
+    """在一张网格上，从展开点向两边走到误差超限为止。"""
+    import numpy as np
+
+    err = _error_curve(expr, var, poly, xs)
     index = int(np.argmin(np.abs(xs - center)))
     if not np.isfinite(err[index]) or err[index] >= tolerance:
         return 0.0, center, center
@@ -401,9 +428,39 @@ def expansion_holds(expr, var, poly, point, tolerance=1e-6,
     while (right < len(xs) - 1 and np.isfinite(err[right + 1])
            and err[right + 1] < tolerance):
         right += 1
-
     return (min(center - xs[left], xs[right] - center),
             float(xs[left]), float(xs[right]))
+
+
+def expansion_holds(expr, var, poly, point, tolerance=1e-6,
+                    span=None, samples=801, grids=4):
+    """数值估计展开式在多大范围内还够准。
+
+    返回 ``(radius, left, right, spread)``：
+
+      * ``radius`` —— 从展开点向两侧走到误差超过 tolerance 的距离
+      * ``left`` / ``right`` —— 对应的区间端点
+      * ``spread`` —— 各张网格给出的半径之间的最大差值
+
+    .. warning:: **这是采样估计，不是保证的上界。**
+
+       高频函数可能被网格漏采。用多张网格（等距 + 确定性抖动）并取最
+       保守的结果能大幅降低混叠，但严格的区间需要余项界 —— 这里给不了。
+       ``spread`` 偏大就说明函数变化比采样快，结果只能当参考。
+    """
+    center = float(point)
+    if span is None:
+        span = max(1.0, abs(center)) * 1.5
+
+    results = []
+    for phase in range(max(1, grids)):
+        count = samples + 8 * phase
+        xs = _sampled_grid(center, span, count, phase)
+        results.append(_hold_once(expr, var, poly, center, tolerance, xs))
+
+    radius, left, right = min(results, key=lambda r: r[0])
+    spread = max(r[0] for r in results) - min(r[0] for r in results)
+    return radius, left, right, spread
 
 
 def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):

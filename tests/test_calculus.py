@@ -181,6 +181,57 @@ class TestTaylor(unittest.TestCase):
         self.assertAlmostEqual(cs.constant_float("0.5"), 0.5)
         self.assertAlmostEqual(cs.constant_float("2*pi"), 6.283185307179586)
 
+    # ---- 采样区间：混叠与常数 ----
+    def test_aliasing_is_caught(self):
+        """高速振荡函数不能被等距采样骗过。
+
+        x + sin(800*pi*x/3)**2 在 [-1.5, 1.5] 上取 801 点，步长正好是
+        振荡的半个周期，每个采样点都落在零点附近，单张等距网格会报出
+        radius=1.5 —— 而 x=3/1600 处误差其实是 1。多网格 + 抖动之后
+        半径必须明显收缩。
+        """
+        expr = "x + sin(800*pi*x/3)**2"
+        poly, _notes = cs.taylor_poly(expr, "x", point=0, order=1)
+        radius, _lo, _hi, spread = cs.expansion_holds(
+            expr, "x", poly, 0, tolerance=1e-3, grids=2)
+        self.assertLess(radius, 1.0, f"半径不该是 {radius}（混叠没修好）")
+        self.assertGreater(spread, 0.05,
+                           "各网格结果应该明显不一致，才说明有混叠风险")
+
+    def test_constant_function_gives_constant_polynomial(self):
+        poly, _notes = cs.taylor_poly("exp(x)", "x", point=0, order=0)
+        self.assertEqual(str(poly), "1")
+
+    def test_error_curve_handles_constants(self):
+        """常数函数 / 常数多项式的结果要铺成和采样网格一样的形状。"""
+        import numpy as np
+        xs = np.linspace(-1, 1, 21)
+        for expr, order in (("3", 5), ("0", 5), ("exp(x)", 0)):
+            poly, _notes = cs.taylor_poly(expr, "x", point=0, order=order)
+            err = cs._error_curve(expr, "x", poly, xs)
+            self.assertEqual(err.shape, xs.shape, f"{expr} 的形状不对")
+            self.assertTrue(np.all(np.isfinite(err)))
+
+    def test_constant_expansion_holds_everywhere(self):
+        """零误差的展开式，整个采样范围都算有效。"""
+        poly, _notes = cs.taylor_poly("3", "x", point=0, order=5)
+        radius, _lo, _hi, _spread = cs.expansion_holds(
+            "3", "x", poly, 0, tolerance=1e-3,
+            samples=201, grids=1)
+        self.assertGreater(radius, 1.0)
+
+    # ---- 常量精度 ----
+    def test_decimal_precision_preserved(self):
+        """ast.parse 会把 1.0000000000000001 变成 1.0，必须用源文本转有理数。"""
+        value = cs._sympy_constant("1.0000000000000001")
+        self.assertEqual(str(value), "10000000000000001/10000000000000000")
+
+    def test_tiny_interval_integral(self):
+        """回归：这段极小区间的积分曾经因为精度丢失算成 0。"""
+        txt, _latex, _notes = cs.integrate_symbolic(
+            "1", "x", lower="1", upper="1.0000000000000001")
+        self.assertEqual(txt, "1/10000000000000000")
+
     def test_two_pi_bound(self):
         txt, _latex, _notes = cs.integrate_symbolic(
             "sin(x)", "x", lower="0", upper="2*pi")

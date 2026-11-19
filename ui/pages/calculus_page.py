@@ -603,8 +603,14 @@ class TaylorTab(_BaseTab):
             f_vals = np.asarray(fn(xs), dtype=complex)
         except Exception:                        # noqa: BLE001
             f_vals = np.array([complex(fn(x)) for x in xs], dtype=complex)
+        # 常数函数返回标量，要铺成和 xs 一样的形状，否则画图报
+        # "x and y must have same first dimension"
+        if f_vals.shape != xs.shape:
+            f_vals = np.broadcast_to(f_vals, xs.shape)
 
         p_vals = np.asarray(cs.lambdify_of(poly)(xs), dtype=complex)
+        if p_vals.shape != xs.shape:
+            p_vals = np.broadcast_to(p_vals, xs.shape)
         err = np.abs(f_vals - p_vals)
 
         fig = self.figure
@@ -636,15 +642,24 @@ class TaylorTab(_BaseTab):
 
         notes: list[str] = []
         try:
-            radius, lo, hi = cs.expansion_holds(
+            radius, lo, hi, spread = cs.expansion_holds(
                 expr, var, poly, center_value, tolerance=tol)
             if radius > 0:
                 notes.append(
-                    f"error < {tol:g} for |{var} - {center_value:g}| < "
-                    f"{radius:.3g}  ({var} in [{lo:.3g}, {hi:.3g}])")
+                    f"sampled: error < {tol:g} for "
+                    f"|{var} - {center_value:g}| < {radius:.3g}  "
+                    f"({var} in [{lo:.3g}, {hi:.3g}])")
             else:
                 notes.append(
-                    f"error already exceeds {tol:g} at the expansion point")
+                    f"sampled: the error exceeds {tol:g} immediately next to "
+                    "the expansion point")
+            # 各网格给出的半径差得远，说明函数变化比采样快，只能当参考
+            if spread > max(0.05, 0.3 * max(radius, 1e-12)):
+                notes.append(
+                    "\u26a0 the estimated range varies between sample grids — "
+                    "this function changes faster than the sampling, so the "
+                    "interval above is indicative only (a guaranteed bound "
+                    "would need a remainder estimate)")
         except Exception as exc:                 # noqa: BLE001
             notes.append(f"Range estimate failed: {type(exc).__name__}: {exc}")
         return notes
