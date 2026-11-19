@@ -29,6 +29,18 @@ from core import calculus_numeric as cn
 from core import calculus_symbolic as cs
 from core import latex_render as lr
 
+# 画图是可选的：没装 matplotlib 时 Taylor 页照样能算，只是不出图
+try:
+    import numpy as np
+    from matplotlib.backends.backend_qtagg import (
+        FigureCanvasQTAgg as FigureCanvas,
+        NavigationToolbar2QT as NavigationToolbar,
+    )
+    from matplotlib.figure import Figure
+    HAS_PLOT = True
+except Exception:                                # noqa: BLE001
+    HAS_PLOT = False
+
 #: 变量假设：(中文, core 里用的键)
 ASSUMPTIONS = [
     ("Real (default)", None),
@@ -529,11 +541,20 @@ class TaylorTab(_BaseTab):
         var_row.addStretch(1)
         self.form.addRow("Variable", _wrap(var_row))
 
+        self.tol_box = QComboBox()
+        for label, value in (("1e-2", 1e-2), ("1e-3", 1e-3),
+                             ("1e-4", 1e-4), ("1e-6", 1e-6)):
+            self.tol_box.addItem(label, value)
+        self.tol_box.setCurrentIndex(1)
+        self.tol_box.setFixedWidth(78)
+
         pt_row = QHBoxLayout()
         pt_row.setSpacing(8)
         pt_row.addWidget(self.center)
         pt_row.addWidget(QLabel("Order"))
         pt_row.addWidget(self.order)
+        pt_row.addWidget(QLabel("Tolerance"))
+        pt_row.addWidget(self.tol_box)
         pt_row.addStretch(1)
         self.form.addRow("Expand at", _wrap(pt_row))
 
@@ -542,6 +563,91 @@ class TaylorTab(_BaseTab):
         chk_row.addWidget(self.check)
         chk_row.addStretch(1)
         self.form.addRow("Check at (optional)", _wrap(chk_row))
+
+        # ---- 图：f 和 P_n 叠在一起，下面配误差曲线 ----
+        self.figure = None
+        self.canvas = None
+        if HAS_PLOT:
+            self.figure = Figure(figsize=(7.4, 3.6), dpi=100)
+            self.canvas = FigureCanvas(self.figure)
+            self.canvas.setMinimumHeight(300)
+            self.toolbar = NavigationToolbar(self.canvas, self)
+            box = QFrame()
+            box.setObjectName("formBox")
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(6, 6, 6, 4)
+            box_layout.setSpacing(2)
+            box_layout.addWidget(self.canvas, 1)
+            box_layout.addWidget(self.toolbar)
+            # form(0) -> buttons(1) -> 图(2) -> 结果(3)
+            self.layout().insertWidget(2, box)
+
+    def clear(self) -> None:
+        super().clear()
+        if self.figure is not None:
+            self.figure.clear()
+            self.canvas.draw_idle()
+
+    def _draw(self, expr, var, poly, center_value, tol, order) -> list[str]:
+        """画 f 与 P_n，并在下面画误差曲线。返回要追加到结果里的说明。"""
+        if self.figure is None:
+            return []
+
+        span = max(1.0, abs(center_value)) * 1.5
+        xs = np.linspace(center_value - span, center_value + span, 601)
+
+        compiled = cn.CompiledExpression(expr, variables=[var])
+        fn = (compiled.function(var) if compiled.variables
+              else (lambda _x: compiled.evaluate()))
+        try:
+            f_vals = np.asarray(fn(xs), dtype=complex)
+        except Exception:                        # noqa: BLE001
+            f_vals = np.array([complex(fn(x)) for x in xs], dtype=complex)
+
+        p_vals = np.asarray(cs.lambdify_of(poly)(xs), dtype=complex)
+        err = np.abs(f_vals - p_vals)
+
+        fig = self.figure
+        fig.clear()
+        ax1 = fig.add_subplot(2, 1, 1)
+        ax2 = fig.add_subplot(2, 1, 2)
+
+        ax1.plot(xs, f_vals.real, linewidth=2, label=f"f({var})")
+        ax1.plot(xs, p_vals.real, "--", linewidth=2, label=f"P_{order}({var})")
+        ax1.axvline(center_value, color="gray", linestyle=":", linewidth=1)
+        ax1.set_ylabel("value")
+        ax1.set_title(
+            f"Taylor expansion about {var} = {center_value:g}", fontsize=9)
+        ax1.legend(loc="best", fontsize=8)
+        ax1.grid(alpha=0.3)
+
+        # 误差为 0 的点在对数轴上画不出来，换成 NaN 跳过
+        ax2.semilogy(xs, np.where(err > 0, err, np.nan),
+                     color="crimson", linewidth=1.4)
+        ax2.axhline(tol, color="gray", linestyle="--", linewidth=1,
+                    label=f"tolerance {tol:g}")
+        ax2.set_xlabel(var)
+        ax2.set_ylabel("|f - P|")
+        ax2.legend(loc="best", fontsize=8)
+        ax2.grid(alpha=0.3)
+
+        fig.tight_layout()
+        self.canvas.draw_idle()
+
+        notes: list[str] = []
+        try:
+            radius, lo, hi = cs.expansion_holds(
+                expr, var, poly, center_value, tolerance=tol)
+            if radius > 0:
+                notes.append(
+                    f"error < {tol:g} for |{var} - {center_value:g}| < "
+                    f"{radius:.3g}  ({var} in [{lo:.3g}, {hi:.3g}])")
+            else:
+                notes.append(
+                    f"error already exceeds {tol:g} at the expansion point")
+        except Exception as exc:                 # noqa: BLE001
+            notes.append(f"Range estimate failed: {type(exc).__name__}: {exc}")
+        return notes
 
     def compute(self) -> None:
         expr = self.expr.text().strip()
@@ -574,6 +680,21 @@ class TaylorTab(_BaseTab):
         check_text = self.check.text().strip()
         if check_text and poly is not None:
             lines.extend(self._compare(expr, var, poly, check_text))
+
+        # 画图 + 有效区间
+        if self.figure is not None:
+            if poly is None:
+                self.figure.clear()
+                self.canvas.draw_idle()
+            else:
+                try:
+                    center_value = cs.constant_float(center_text)
+                    tol = float(self.tol_box.currentData())
+                    lines.extend([""])
+                    lines.extend(self._draw(expr, var, poly, center_value,
+                                            tol, order))
+                except Exception as exc:         # noqa: BLE001
+                    lines.append(f"Plot failed: {type(exc).__name__}: {exc}")
 
         if symbolic_text is None:
             self.result.show_result(error="\n".join(lines))

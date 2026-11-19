@@ -331,6 +331,81 @@ def latex_of(expr) -> str:
         return str(expr)
 
 
+def constant_float(value) -> float:
+    """把常量表达式（"pi/2"、"0.5"…）转成 Python 浮点。
+
+    界面画图要知道展开点在哪，但不应直接碰 _sympy_constant。
+    """
+    return float(_sympy_constant(value))
+
+
+def lambdify_of(expr):
+    """把 sympy 表达式转成能用 numpy 数组调用的函数。
+
+    界面画曲线用：逐个 ``subs()`` 求值太慢，lambdify 之后一次算一整条。
+    没有自由符号（纯常数）时返回一个忽略参数的函数。
+    """
+    sp = _require()
+    syms = sorted(getattr(expr, "free_symbols", ()), key=str)
+    if not syms:
+        value = complex(expr)
+        return lambda *args, **kwargs: value
+    return sp.lambdify(syms, expr, modules="numpy")
+
+
+def expansion_holds(expr, var, poly, point, tolerance=1e-6,
+                    span=None, samples=801):
+    """数值估计展开式在多大范围内还够准。
+
+    返回 ``(radius, left, right)``：从展开点向两侧找，最后一个满足
+    ``|f(x) - P(x)| < tolerance`` 的位置。
+
+    这是**数值探测**，不是严格的收敛半径 —— 物理上更关心「在我的工作
+    区间里够不够准」，这个问法更实用（也顺带能发现奇点）。
+    """
+    sp = _require()
+    import numpy as np
+
+    from .expr_eval import CompiledExpression
+
+    center = float(point)
+    if span is None:
+        span = max(1.0, abs(center)) * 1.5
+
+    xs = np.linspace(center - span, center + span, samples)
+
+    compiled = CompiledExpression(expr, variables=[var])
+    fn = (compiled.function(var) if compiled.variables
+          else (lambda _x: compiled.evaluate()))
+    try:
+        f_vals = np.asarray(fn(xs), dtype=complex)
+    except Exception:                            # noqa: BLE001
+        f_vals = np.array([complex(fn(x)) for x in xs], dtype=complex)
+
+    syms = sorted(getattr(poly, "free_symbols", ()), key=str)
+    if len(syms) == 1:
+        p_vals = np.asarray(sp.lambdify(syms, poly, modules="numpy")(xs),
+                            dtype=complex)
+    else:
+        p_vals = np.full(xs.shape, complex(poly), dtype=complex)
+
+    err = np.abs(f_vals - p_vals)
+    index = int(np.argmin(np.abs(xs - center)))
+    if not np.isfinite(err[index]) or err[index] >= tolerance:
+        return 0.0, center, center
+
+    left = index
+    while left > 0 and np.isfinite(err[left - 1]) and err[left - 1] < tolerance:
+        left -= 1
+    right = index
+    while (right < len(xs) - 1 and np.isfinite(err[right + 1])
+           and err[right + 1] < tolerance):
+        right += 1
+
+    return (min(center - xs[left], xs[right] - center),
+            float(xs[left]), float(xs[right]))
+
+
 def taylor_poly(expr, var="x", point=0, order=5, assumptions=None):
     """在 point 处把 expr 展开成 order 次多项式。
 

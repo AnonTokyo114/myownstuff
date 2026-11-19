@@ -148,6 +148,39 @@ class TestTaylor(unittest.TestCase):
             "cos(x)", "x", lower="0", upper="pi/2")
         self.assertEqual(txt, "1")
 
+    def test_lambdify_matches_direct_evaluation(self):
+        """画图用 lambdify，必须和逐点求值一致。"""
+        import numpy as np
+        poly, _notes = cs.taylor_poly("sin(x)", "x", point=0, order=5)
+        fn = cs.lambdify_of(poly)
+        xs = np.array([0.0, 0.5, 1.0])
+        got = fn(xs)
+        # sin 的 5 阶展开在 x=1 处是 1 - 1/6 + 1/120
+        self.assertAlmostEqual(got[2], 1 - 1/6 + 1/120, places=12)
+
+    def test_expansion_holds_higher_order_wins(self):
+        """阶数越高，满足同一容差的区间越大。"""
+        low, _ = cs.taylor_poly("sin(x)", "x", point=0, order=1)
+        high, _ = cs.taylor_poly("sin(x)", "x", point=0, order=5)
+        r_low = cs.expansion_holds("sin(x)", "x", low, 0, tolerance=1e-2)[0]
+        r_high = cs.expansion_holds("sin(x)", "x", high, 0, tolerance=1e-2)[0]
+        self.assertGreater(r_high, r_low)
+        # sin x ≈ x 在一阶、1% 容差下大约 0.39
+        self.assertGreater(r_low, 0.2)
+        self.assertLess(r_low, 0.7)
+
+    def test_expansion_holds_tolerance_monotonic(self):
+        """容差放宽，有效区间不会变小。"""
+        poly, _ = cs.taylor_poly("exp(x)", "x", point=0, order=3)
+        tight = cs.expansion_holds("exp(x)", "x", poly, 0, tolerance=1e-5)[0]
+        loose = cs.expansion_holds("exp(x)", "x", poly, 0, tolerance=1e-2)[0]
+        self.assertGreaterEqual(loose, tight)
+
+    def test_constant_float(self):
+        self.assertAlmostEqual(cs.constant_float("pi/2"), 1.5707963267948966)
+        self.assertAlmostEqual(cs.constant_float("0.5"), 0.5)
+        self.assertAlmostEqual(cs.constant_float("2*pi"), 6.283185307179586)
+
     def test_two_pi_bound(self):
         txt, _latex, _notes = cs.integrate_symbolic(
             "sin(x)", "x", lower="0", upper="2*pi")
