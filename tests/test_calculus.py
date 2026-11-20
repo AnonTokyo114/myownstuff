@@ -357,16 +357,46 @@ class TestTaylor(unittest.TestCase):
         b = cs.taylor("exp(x)", "x", point="2", order=2)[0]
         self.assertEqual(a, b)
 
+    # ---- 连续性（零阶条件）----
+    def test_discontinuous_point_rejected(self):
+        """sign(x)**2 在 0 处左右极限都是 1，但 f(0)=0 —— 不连续。
+
+        只比较左右极限会放它过关，所以零阶还要核对 f(a) 等于极限。
+        """
+        with self.assertRaises(cs.SymbolicError):
+            cs.taylor("sign(x)**2", "x", point=0, order=3)
+
+    def test_continuity_check_does_not_over_reject(self):
+        """连续性检查不能误伤真正连续的分段函数。"""
+        for expr, point in (("x*abs(x)", 0), ("sign(x)", 1), ("sin(x)", 0),
+                            ("abs(x)", 1)):
+            txt, _latex, _notes = cs.taylor(expr, "x", point=point, order=1)
+            self.assertTrue(txt, expr)
+
     # ---- 平移基底 ----
-    def test_basis_text(self):
+    def test_basis_text_algebraically_correct(self):
+        """各种展开点的基底必须代数等价于 x - center。
+
+        覆盖复合常量（pi/2 ± 1）和负数。之前按字符串首字符判负号，
+        对 "pi/2 - 1"（str 是 "-1 + pi/2"）会删错位置。
+        """
+        sp = cs._require()
+        x = sp.Symbol("x")
+        for center in (sp.Integer(0), sp.Integer(2), sp.pi / 2,
+                       sp.pi / 2 - 1, -sp.pi / 2 - 1, sp.pi / 2 + 1,
+                       -sp.E, sp.Rational(3, 2)):
+            text = cs.basis_text("x", center)
+            parsed = sp.sympify(text)
+            expected = sp.simplify(x - center)
+            for probe in (0.37, 1.9, -2.3):
+                got = complex(parsed.subs(x, probe))
+                want = complex(expected.subs(x, probe))
+                self.assertAlmostEqual(abs(got - want), 0.0, places=12,
+                                       msg=f"center={center}: {text}")
+
+    def test_basis_text_zero_center_is_bare_var(self):
         sp = cs._require()
         self.assertEqual(cs.basis_text("x", sp.Integer(0)), "x")
-        self.assertEqual(cs.basis_text("x", sp.Integer(2)), "(x - 2)")
-        self.assertEqual(cs.basis_text("x", sp.pi / 2), "(x - pi/2)")
-        # 关键回归：展开点自身是加法时必须整体加括号
-        self.assertEqual(cs.basis_text("x", sp.pi / 2 + 1),
-                         "(x - (1 + pi/2))")
-        self.assertEqual(cs.basis_text("x", -sp.E), "(x + E)")
 
     def test_sum_center_series_matches_numeric_center(self):
         """展开点 "pi/2+1" 和它的数值形式必须给出同一个展开。"""

@@ -351,18 +351,23 @@ def constant_of(value):
 def basis_text(var, center_expr):
     """构造平移基底 ``(var - center)`` 的字符串。
 
-    展开点本身可能是加法（``1 + pi/2``），直接放在减号后面会变
-    ``(x - 1 + pi/2)`` —— 那等于 ``x - 1 + pi/2``，不是 ``x - (1 + pi/2)``。
-    所以这里统一检查并整体加括号。负的展开点写成 ``x + ...``，更易读。
+    展开点本身可能是加法或带负号（``pi/2 + 1``、``pi/2 - 1``、
+    ``-pi/2 - 1``）。靠字符串判断和删负号并不等于对整体取负：
+    ``str(pi/2 - 1)`` 是 ``"-1 + pi/2"``，删掉开头那个负号会得到
+    ``x + 1 + pi/2``，而正确的基底是 ``x + 1 - pi/2``。
+
+    所以直接做符号减法，让 sympy 归一化，再把结果整体括起来。
     """
     if center_expr == 0:
         return var
-    text = str(center_expr)
-    if text.startswith("-"):
-        return f"({var} + {text[1:]})"
-    if " " in text or "+" in text:
-        return f"({var} - ({text}))"
-    return f"({var} - {text})"
+    sp = _require()
+    try:
+        symbol = sp.Symbol(var)
+        shifted = sp.simplify(symbol - center_expr)
+        return f"({shifted})"
+    except Exception:                            # noqa: BLE001
+        # 兜底：整体加括号，至少不会算错
+        return f"({var} - ({center_expr}))"
 
 
 def constant_float(value) -> float:
@@ -632,6 +637,51 @@ def _validate_taylor(expr_s, symbol, poly, center, order):
             raise SymbolicError(
                 "No Taylor polynomial exists at this point: the expansion "
                 "contains a negative or fractional power.")
+
+    # 零阶条件：f 在展开点必须**连续**，且 f(a) 等于极限值。
+    #
+    # sign(x)**2 是个反例：x≠0 时恒为 1，f(0)=0。左右极限都是 1，
+    # 只比较左右极限会放它过关，但那个点根本不连续，谈不上泰勒多项式。
+    suspicious = (sp.Abs, sp.sign, sp.Piecewise, sp.Min, sp.Max,
+                  sp.floor, sp.ceiling)
+
+    try:
+        at_center = expr_s.subs(symbol, center)
+    except Exception:                            # noqa: BLE001
+        at_center = None
+
+    if at_center is not None:
+        if at_center.has(sp.zoo) or at_center.has(sp.nan):
+            raise SymbolicError(
+                "f is undefined at the expansion point, so there is no "
+                "Taylor polynomial there.")
+        if at_center.is_finite is False:
+            raise SymbolicError(
+                "f is infinite at the expansion point, so there is no "
+                "Taylor polynomial there.")
+
+    if at_center is not None and (expr_s.has(*suspicious)
+                                  or at_center.has(*suspicious)):
+        try:
+            limit_value = sp.limit(expr_s, symbol, center)
+        except Exception:                        # noqa: BLE001
+            limit_value = None
+        if limit_value is not None:
+            if (limit_value.has(sp.zoo) or limit_value.has(sp.nan)
+                    or limit_value.is_finite is False):
+                raise SymbolicError(
+                    "f has no finite limit at the expansion point, so there "
+                    "is no Taylor polynomial there.")
+            try:
+                continuous = sp.simplify(at_center - limit_value) == 0
+            except Exception:                    # noqa: BLE001
+                continuous = at_center == limit_value
+            if not continuous:
+                raise SymbolicError(
+                    f"f is not continuous at the expansion point "
+                    f"(f({center}) = {at_center} but the limit is "
+                    f"{limit_value}). A Taylor polynomial requires a "
+                    "continuous function there.")
 
     # 导数存在性：用**符号求导**逐阶核验，而不是固定步长的差商。
     #
