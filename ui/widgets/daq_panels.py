@@ -419,6 +419,9 @@ class PhotonPanel(QWidget):
         self._timer = QTimer(self)
         self._timer.setSingleShot(False)
         self._timer.timeout.connect(self._tick)
+        #: 操作序号。Stop 递增它，让「已经点过但还没执行」的旧 Start
+        #: 立刻失效，否则旧 Start 可能在 Stop 之后又把任务重新启动起来。
+        self._generation = 0
 
         self._build()
 
@@ -592,11 +595,27 @@ class PhotonPanel(QWidget):
             QMessageBox.warning(self, "Invalid value", str(exc))
             return
 
+        self._generation += 1
+        generation = self._generation
+
         def work():
-            return dev.start(counter=self.counter_edit.text().strip() or None,
-                             source=self.source_edit.text().strip() or None)
+            if generation != self._generation:
+                return None                      # 已被 Stop 取消
+            first = dev.start(
+                counter=self.counter_edit.text().strip() or None,
+                source=self.source_edit.text().strip() or None)
+            if generation != self._generation:
+                # 启动过程中被 Stop 了：撤销，别留下在跑的计数器
+                try:
+                    dev.stop()
+                except Exception:                # noqa: BLE001
+                    pass
+                return None
+            return first
 
         def done(first) -> None:
+            if generation != self._generation or first is None:
+                return                           # 过期 / 已取消
             self._reset_data()
             self._prev_count = int(first)
             self._t0 = self._prev_time = time.perf_counter()
@@ -613,6 +632,8 @@ class PhotonPanel(QWidget):
             self._timer.start(max(50, int(bin_time * 1000)))
 
         def failed(msg: str) -> None:
+            if generation != self._generation:
+                return                           # 过期失败，不打扰用户
             self.status_label.setText(f"Error (counting not running): {msg}")
             self.log_line.emit(f"Photon counting failed: {msg}")
             QMessageBox.critical(self, "Counting failed", msg)
@@ -736,21 +757,32 @@ class PhotonPanel(QWidget):
         所以运行中用「此刻的时间 + 此刻的累计计数」重建基线，让新一段
         从 0 秒、0 个计数重新开始；没在运行时才彻底清零。
         """
-        self._times.clear()
-        self._rates.clear()
-        self._log = []
+        # 先把基线确定下来，再清显示数据：读失败时应该**什么都不动**，
+        # 连已经画出来的曲线也保留，否则用户点了清图却只丢数据不清基线。
         if self._running and self._device is not None:
-            now = time.perf_counter()
             try:
-                self._prev_count = int(self._device.read())
-            except Exception:                        # noqa: BLE001
-                self._prev_count = 0
+                count = int(self._device.read())
+            except Exception as exc:                 # noqa: BLE001
+                # 读不到基线时**不能清**：把「读不到」当成「累计数是 0」，
+                # 下一条就会把整段累计（可能是上百万）当成新增计数，
+                # 伪造出一个几千万 cps 的假峰，还会进 CSV。
+                self.log_line.emit(
+                    f"Clear plot skipped: could not read the current count "
+                    f"({exc}). The plot and baseline were left untouched.")
+                return
+            now = time.perf_counter()
+            self._prev_count = count
             self._prev_time = now
             self._t0 = now
         else:
             self._prev_count = 0
             self._prev_time = 0.0
             self._t0 = 0.0
+
+        # 基线确定之后才清显示数据
+        self._times.clear()
+        self._rates.clear()
+        self._log = []
         if self.figure is not None and self.canvas is not None:
             self._line.set_data([], [])
             self.canvas.draw_idle()
@@ -822,6 +854,10 @@ class PulsePanel(QWidget):
         super().__init__(parent)
         self._device = None
         self._running = False
+        #: 操作序号。Stop 递增它，让尚未执行的旧 Start/Apply 失效 ——
+        #: 否则「点 Apply → 点 Stop → 旧 Apply 才执行」会让脉冲在
+        #: Stop 之后又跑起来。
+        self._generation = 0
         self._build()
 
     def _build(self) -> None:
@@ -923,11 +959,27 @@ class PulsePanel(QWidget):
             QMessageBox.warning(self, "Invalid value", str(exc))
             return
 
+        self._generation += 1
+        generation = self._generation
+
         def work():
-            return dev.start(freq, duty,
-                             counter=self.counter_edit.text().strip() or None)
+            if generation != self._generation:
+                return None                      # 已被 Stop 取消
+            params = dev.start(
+                freq, duty,
+                counter=self.counter_edit.text().strip() or None)
+            if generation != self._generation:
+                # 启动过程中被 Stop 了：立刻撤销，不然会留下在跑的脉冲
+                try:
+                    dev.stop()
+                except Exception:                # noqa: BLE001
+                    pass
+                return None
+            return params
 
         def done(params) -> None:
+            if generation != self._generation or params is None:
+                return                           # 过期 / 已取消
             f, d = params
             self._running = True
             self.status_label.setText(
@@ -939,6 +991,8 @@ class PulsePanel(QWidget):
             self._update_controls()
 
         def failed(msg: str) -> None:
+            if generation != self._generation:
+                return                           # 过期失败，不打扰用户
             self._running = False
             self.status_label.setText(f"Error (pulse not running): {msg}")
             self.log_line.emit(f"Pulse start failed: {msg}")
@@ -954,6 +1008,9 @@ class PulsePanel(QWidget):
         dev = self._device
         if dev is None:
             return
+
+        # 递增序号：所有「已提交但还没跑」的 Start 到这里就作废了
+        self._generation += 1
 
         def work():
             return dev.stop()

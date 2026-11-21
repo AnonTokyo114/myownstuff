@@ -173,6 +173,194 @@ class DaqPageTest(unittest.TestCase):
         self.assertTrue(ph._running, "重连后无法开始计数")
         ph.stop()
 
+    # ---- #1 启停时序 ----
+    def test_stop_cancels_pending_start(self):
+        """Stop 之后，尚未执行的旧 Apply 不能把脉冲重新启动起来。
+
+        复现路径：启动脉冲 → 提交一个 Apply（后台还没跑）→ 点 Stop。
+        Stop 释放了旧任务，但那个 Apply 之后仍然调用 dev.start 建了新任务。
+        """
+        from ui.widgets.daq_panels import PulsePanel
+
+        class FakePulse:
+            def __init__(self):
+                self.started = []
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self.started.append((f, d))
+                self.last_params = (f, d)
+                return f, d
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                return "fake"
+
+        panel = PulsePanel()
+        fake = FakePulse()
+        panel.set_device(fake)
+        panel.freq_spin.setValue(1000.0)
+        panel.duty_spin.setValue(25.0)
+
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.start()          # 提交但未执行
+            panel.stop()           # 让上面那个失效
+
+        self.assertEqual(len(pending), 2)
+
+        # Stop 先完成
+        _w, stop_done, _f = pending[1]
+        stop_done(None)
+
+        # 再执行被挂起的旧 Apply
+        old_work, old_done, _f = pending[0]
+        old_done(old_work())
+        self.app.processEvents()
+
+        self.assertEqual(fake.started, [], "旧 Apply 又启动了脉冲")
+        self.assertIsNone(fake.last_params)
+        self.assertNotIn("Pulsing", panel.status_label.text())
+        panel.interrupt()
+
+    def test_normal_start_still_works(self):
+        """加了序号校验之后，正常启动不能被误伤。"""
+        from ui.widgets.daq_panels import PulsePanel
+
+        class FakePulse:
+            def __init__(self):
+                self.started = []
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self.started.append((f, d))
+                self.last_params = (f, d)
+                return f, d
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                return "fake"
+
+        panel = PulsePanel()
+        fake = FakePulse()
+        panel.set_device(fake)
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.start()
+
+        work, done, _f = pending[0]
+        done(work())
+        self.app.processEvents()
+
+        self.assertEqual(len(fake.started), 1)
+        self.assertIn("Pulsing", panel.status_label.text())
+        panel.interrupt()
+
+    # ---- #2 清图读失败 ----
+    def test_clear_plot_read_failure_keeps_baseline(self):
+        """读不到基线时不能当成 0 —— 那会伪造出几千万 cps 的假峰。"""
+
+        class FlakyCounter:
+            def __init__(self):
+                self.count = 1_000_000
+                self.fail_next = False
+                self.counter = "Dev1/ctr0"
+                self.source = "/Dev1/PFI0"
+
+            def read(self):
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("injected read failure")
+                return self.count
+
+            def clamp_bin(self, v):
+                return float(v)
+
+            def start(self, counter=None, source=None):
+                return 0
+
+            def stop(self):
+                return None
+
+        from ui.widgets.daq_panels import PhotonPanel
+
+        panel = PhotonPanel()
+        flaky = FlakyCounter()
+        panel.set_device(flaky)
+        panel._running = True
+        panel._prev_count = 1_000_000
+        panel._prev_time = 1234.5
+        panel._t0 = 1000.0
+        panel._times.append(1.0)
+        panel._rates.append(12000.0)
+
+        flaky.fail_next = True
+        panel.clear_plot()
+        self.app.processEvents()
+
+        self.assertEqual(panel._prev_count, 1_000_000, "基线被清零了")
+        self.assertEqual(panel._prev_time, 1234.5, "时间基线被改了")
+        self.assertEqual(len(panel._times), 1, "数据被清了（应该原样保留）")
+        self.assertEqual(panel._delta(panel._prev_count, 1_000_100), 100)
+        panel._running = False
+
+    # ---- #3 默认通道跟随板卡 ----
+    def test_defaults_follow_resource(self):
+        """选 Dev9 时默认通道要变成 Dev9/*，不能还指着 Dev1。"""
+        page = self.page
+        page.selector._configs["local"]["resource"] = "Dev9"
+        page._sync_defaults()
+        self.app.processEvents()
+
+        self.assertEqual(page.analog_a.channel_edit.text(), "Dev9/ao2")
+        self.assertEqual(page.analog_b.channel_edit.text(), "Dev9/ao3")
+        self.assertEqual(page.photon.counter_edit.text(), "Dev9/ctr0")
+        self.assertEqual(page.photon.source_edit.text(), "/Dev9/PFI0")
+
+    def test_manual_channel_survives_resource_change(self):
+        """用户手改过的通道不能被「同步默认值」覆盖。"""
+        page = self.page
+        page.analog_a.channel_edit.setText("Dev9/ao0")
+        page._sync_defaults()
+        self.app.processEvents()
+        self.assertEqual(page.analog_a.channel_edit.text(), "Dev9/ao0")
+
+    def test_connected_device_uses_resource_channels(self):
+        """连接后设备的 channel 必须来自当前资源。"""
+        page = self.page
+        page.analog_a.channel_edit.setText("")
+        page.analog_b.channel_edit.setText("")
+        page.selector._configs["local"]["resource"] = "Dev9"
+        page._sync_defaults(force=True)
+        self.connect()
+        self.assertTrue(page._main_device.channel.startswith("Dev9/"),
+                        page._main_device.channel)
+        self.assertTrue(
+            getattr(page._second_device, "channel", "").startswith("Dev9/"),
+            getattr(page._second_device, "channel", None))
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

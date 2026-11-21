@@ -51,6 +51,8 @@ class DaqPage(QWidget):
         self._second_device = None
         self._photon_device = None
         self._pulse_device = None
+        #: 每个通道输入框「上次自动填的值」，用来区分自动内容与用户输入
+        self._auto_defaults: dict = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -129,7 +131,10 @@ class DaqPage(QWidget):
             lambda msg: QApplicationCritical(self, msg))
         self.clear_log_btn.clicked.connect(self.log_view.clear)
 
-        self._update_titles()
+        # 设备下拉一换（比如 Dev1 -> Dev9），自动填的通道名要跟着变
+        self.selector.device_box.currentIndexChanged.connect(
+            lambda *_: self._sync_defaults())
+        self._sync_defaults(force=True)
 
     # ------------------------------------------------------------------ 工具
     @property
@@ -151,31 +156,55 @@ class DaqPage(QWidget):
         stamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{stamp}] {text}")
 
-    def _update_titles(self) -> None:
-        """给**空着的**输入框补默认值。
-
-        只在空时补：用户可能已经写了 Dev9/ao0 或 Dev9/ctr1，连接时
-        把它们覆盖成 ao2/ctr0 就是「界面上显示的和实际用的不一样」。
-        """
-        resource = self._resource()
-        if not resource:
-            return
-        defaults = [
+    def _default_entries(self, resource: str) -> list:
+        return [
             (self.analog_a.channel_edit, f"{resource}/ao2"),
             (self.analog_b.channel_edit, f"{resource}/{SECOND_CHANNEL_SUFFIX}"),
             (self.photon.counter_edit, f"{resource}/ctr0"),
             (self.photon.source_edit, f"/{resource}/PFI0"),
             (self.pulse.counter_edit, f"{resource}/ctr0"),
         ]
-        for edit, default in defaults:
-            if not edit.text().strip():
+
+    def _sync_defaults(self, force: bool = False) -> None:
+        """把「自动填的」默认通道同步成当前板卡名。
+
+        需要区分两种内容：
+
+          * 程序自己填的默认值（比如 Dev1/ao2）—— 换板卡时**应该**
+            跟着变成 Dev9/ao2
+          * 用户手改过的值（Dev9/ao0）—— 必须保留
+
+        只看「输入框是否为空」是不够的：构造时已经把 Dev1/ao2 填进去
+        了，它非空，于是换到 Dev9 之后仍然往 Dev1 上输出 —— 界面上写
+        着 Dev9，task 建在 Dev1，这比直接报错更危险。
+
+        所以记下每个框上次自动填的值，只有「当前值 == 上次自动值」才
+        认为是自动内容、可以覆盖。
+        """
+        resource = self._resource()
+        if not resource:
+            return
+        for edit, default in self._default_entries(resource):
+            last_auto = self._auto_defaults.get(edit)
+            current = edit.text().strip()
+            if force or not current or current == last_auto:
                 edit.setText(default)
+                self._auto_defaults[edit] = default
 
     def _resource(self) -> str:
+        """当前板卡名。
+
+        连接后用设备的；没连接时**必须**读 selector 里选的资源 ——
+        之前直接返回 "Dev1"，于是选了 Dev9 之后默认通道还是 Dev1/ao2，
+        task 就真的建在 Dev1 上了。
+        """
         device = self._main_device
         if device is not None:
             return getattr(device, "resource", "Dev1")
-        return "Dev1"
+        try:
+            return self.selector.current_resource() or "Dev1"
+        except Exception:                            # noqa: BLE001
+            return "Dev1"
 
     def _is_placeholder(self) -> bool:
         """连接的是占位设备吗？
@@ -244,7 +273,7 @@ class DaqPage(QWidget):
             self.pulse.set_device(None)
             self._append_log(f"Pulse generator unavailable: {exc}")
 
-        self._update_titles()
+        self._sync_defaults()
 
     def _on_disconnected(self) -> None:
         self.analog_a.set_device(None)

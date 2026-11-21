@@ -524,6 +524,15 @@ class DeviceSelector(QFrame):
     def rescan(self) -> None:
         self.reload_devices()
 
+    def current_resource(self) -> str:
+        """当前连接参数里的资源名（local 就是 "Dev1" 这种）。
+
+        DeviceSpec 上没有这个字段 —— 它是连接参数的一部分，存在
+        _configs 里。界面需要它来推导默认通道名前缀，所以开个口子。
+        """
+        params = self._configs.get(self._conn_kind, {})
+        return str(params.get("resource", "") or "")
+
     def current_spec_key(self) -> str:
         return self.device_box.currentData() or ""
 
