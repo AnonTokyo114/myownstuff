@@ -544,6 +544,15 @@ class PhotonPanel(QWidget):
 
     # ------------------------------------------------------------------
     def set_device(self, device) -> None:
+        """绑定/解绑设备。
+
+        解绑时必须**先停掉自己在跑的东西**：旧定时器如果还活着，会在
+        新连接建立后继续对新设备发起 read，而那个设备上的任务根本
+        没启动过；同时 _running 残留会让 Start 按钮一直灰着，新连接
+        没法马上开始计数。
+        """
+        if device is None and (self._running or self._timer.isActive()):
+            self.interrupt()
         self._device = device
         if device is not None:
             counter = getattr(device, "counter", None)
@@ -552,6 +561,9 @@ class PhotonPanel(QWidget):
                 self.counter_edit.setText(counter)
             if source:
                 self.source_edit.setText(source)
+            # 新连接：状态归零，按钮按「未运行」重新启用
+            self._running = False
+            self._timer.stop()
         self._update_controls()
         self._update_status()
 
@@ -714,7 +726,34 @@ class PhotonPanel(QWidget):
             self.canvas.draw_idle()
 
     def clear_plot(self) -> None:
-        self._reset_data()
+        """清掉已采的数据。
+
+        运行中清图**必须**重建采样基线：计数器还在跑，如果把 _t0 /
+        _prev_time 归零，下一条 _tick 会把绝对 perf_counter（几万秒）
+        当成 elapsed 和 dt，算出 0.36 cps 这种荒唐的速率，而且这个
+        错误基线会一路带进 CSV。
+
+        所以运行中用「此刻的时间 + 此刻的累计计数」重建基线，让新一段
+        从 0 秒、0 个计数重新开始；没在运行时才彻底清零。
+        """
+        self._times.clear()
+        self._rates.clear()
+        self._log = []
+        if self._running and self._device is not None:
+            now = time.perf_counter()
+            try:
+                self._prev_count = int(self._device.read())
+            except Exception:                        # noqa: BLE001
+                self._prev_count = 0
+            self._prev_time = now
+            self._t0 = now
+        else:
+            self._prev_count = 0
+            self._prev_time = 0.0
+            self._t0 = 0.0
+        if self.figure is not None and self.canvas is not None:
+            self._line.set_data([], [])
+            self.canvas.draw_idle()
         self.rate_label.setText("Rate: —")
         self.stats_label.setText("Mean: —   Std: —")
         self.total_label.setText("Total counts: —")
@@ -855,11 +894,15 @@ class PulsePanel(QWidget):
 
     # ------------------------------------------------------------------
     def set_device(self, device) -> None:
+        """绑定/解绑设备；解绑时清掉陈旧的运行标志。"""
+        if device is None and self._running:
+            self.interrupt()
         self._device = device
         if device is not None:
             counter = getattr(device, "counter", None)
             if counter:
                 self.counter_edit.setText(counter)
+            self._running = False
         self._update_controls()
         self._update_status()
 

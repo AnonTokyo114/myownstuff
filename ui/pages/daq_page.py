@@ -137,34 +137,39 @@ class DaqPage(QWidget):
         return self.selector.device
 
     def _device_options(self) -> dict:
-        return {"log_callback": self.log_line.emit,
-                "channel": self.selector_current_channel()}
+        """建主设备时的参数。
 
-    def selector_current_channel(self) -> str | None:
-        """设备下拉里选的是哪块卡 —— 用来给默认通道名前缀。
-
-        真正建 task 时用的是面板上的通道输入框，这里只决定初始值。
+        通道取**面板上用户填的那个**：之前误以为 DeviceSpec 上有
+        resource 字段，结果永远是 None，用户写的 Dev9/ao0 就被 ao2
+        覆盖了。
         """
-        try:
-            spec = self.selector.current_spec()
-        except Exception:                            # noqa: BLE001
-            return None
-        return getattr(spec, "resource", None)
+        channel = self.analog_a.channel_edit.text().strip()
+        return {"log_callback": self.log_line.emit,
+                "channel": channel or None}
 
     def _append_log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{stamp}] {text}")
 
     def _update_titles(self) -> None:
-        """把资源名同步到各面板的默认值，避免用户手填错前缀。"""
+        """给**空着的**输入框补默认值。
+
+        只在空时补：用户可能已经写了 Dev9/ao0 或 Dev9/ctr1，连接时
+        把它们覆盖成 ao2/ctr0 就是「界面上显示的和实际用的不一样」。
+        """
         resource = self._resource()
         if not resource:
             return
-        self.analog_a.channel_edit.setText(f"{resource}/ao2")
-        self.analog_b.channel_edit.setText(f"{resource}/{SECOND_CHANNEL_SUFFIX}")
-        self.photon.counter_edit.setText(f"{resource}/ctr0")
-        self.photon.source_edit.setText(f"/{resource}/PFI0")
-        self.pulse.counter_edit.setText(f"{resource}/ctr0")
+        defaults = [
+            (self.analog_a.channel_edit, f"{resource}/ao2"),
+            (self.analog_b.channel_edit, f"{resource}/{SECOND_CHANNEL_SUFFIX}"),
+            (self.photon.counter_edit, f"{resource}/ctr0"),
+            (self.photon.source_edit, f"/{resource}/PFI0"),
+            (self.pulse.counter_edit, f"{resource}/ctr0"),
+        ]
+        for edit, default in defaults:
+            if not edit.text().strip():
+                edit.setText(default)
 
     def _resource(self) -> str:
         device = self._main_device
@@ -192,15 +197,21 @@ class DaqPage(QWidget):
     def _on_connected(self, device) -> None:
         self._main_device = device
         resource = getattr(device, "resource", "Dev1")
-        self.analog_a.set_device(device)
-        self.analog_a.channel_edit.setText(getattr(device, "channel",
-                                                  f"{resource}/ao2"))
 
-        # ---- 第二路 DC 输出 ----
+        # 第一路：面板上填的就是要用的通道；空着才退回默认
+        channel_a = (self.analog_a.channel_edit.text().strip()
+                     or f"{resource}/ao2")
+        device.channel = channel_a
+        self.analog_a.channel_edit.setText(channel_a)
+        self.analog_a.set_device(device)
+
+        # ---- 第二路 DC 输出：同理，尊重用户填的通道 ----
+        channel_b = (self.analog_b.channel_edit.text().strip()
+                     or f"{resource}/{SECOND_CHANNEL_SUFFIX}")
         try:
             self._second_device = self._spawn(
-                type(device), resource,
-                channel=f"{resource}/{SECOND_CHANNEL_SUFFIX}")
+                type(device), resource, channel=channel_b)
+            self.analog_b.channel_edit.setText(channel_b)
             self.analog_b.set_device(self._second_device)
             self._append_log(
                 f"Second analog channel ready: {self._second_device.channel}")
