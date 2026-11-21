@@ -187,6 +187,7 @@ class DaqPageTest(unittest.TestCase):
                 self.started = []
                 self.last_params = None
                 self.counter = "Dev1/ctr0"
+                self._start_token = 0
 
             def check_params(self, f, d):
                 return float(f), float(d)
@@ -194,7 +195,14 @@ class DaqPageTest(unittest.TestCase):
             def start(self, f, d, counter=None):
                 self.started.append((f, d))
                 self.last_params = (f, d)
-                return f, d
+                self._start_token += 1
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                if token != self._start_token:
+                    return None
+                self.last_params = None
+                return None
 
             def stop(self):
                 self.last_params = None
@@ -243,6 +251,7 @@ class DaqPageTest(unittest.TestCase):
                 self.started = []
                 self.last_params = None
                 self.counter = "Dev1/ctr0"
+                self._start_token = 0
 
             def check_params(self, f, d):
                 return float(f), float(d)
@@ -250,7 +259,14 @@ class DaqPageTest(unittest.TestCase):
             def start(self, f, d, counter=None):
                 self.started.append((f, d))
                 self.last_params = (f, d)
-                return f, d
+                self._start_token += 1
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                if token != self._start_token:
+                    return None
+                self.last_params = None
+                return None
 
             def stop(self):
                 self.last_params = None
@@ -360,6 +376,180 @@ class DaqPageTest(unittest.TestCase):
         self.assertTrue(
             getattr(page._second_device, "channel", "").startswith("Dev9/"),
             getattr(page._second_device, "channel", None))
+
+    # ---- #1 连接设置改变要同步默认通道 ----
+    def test_connection_dialog_updates_defaults(self):
+        """走真实 edit_connection 改资源，界面默认通道要跟着变。
+
+        之前只监听了型号下拉，连接设置里改 local resource 不触发它；
+        而 _on_connected 末尾才同步，那时设备已经用旧通道建好了。
+        """
+        from unittest.mock import patch as _patch
+        from PySide6.QtWidgets import QDialog
+        from ui.widgets.device_selector import ConnectionDialog
+
+        page = self.page
+        page.selector.device_box.setCurrentIndex(self._placeholder_index)
+        self.app.processEvents()
+
+        with _patch.object(ConnectionDialog, "exec",
+                           return_value=QDialog.DialogCode.Accepted), \
+             _patch.object(ConnectionDialog, "result_config",
+                           return_value=("local", {"resource": "Dev9"})):
+            page.selector.edit_connection()
+        self.app.processEvents()
+
+        self.assertEqual(page.selector.current_resource(), "Dev9")
+        self.assertEqual(page.analog_a.channel_edit.text(), "Dev9/ao2")
+        self.assertEqual(page.analog_b.channel_edit.text(), "Dev9/ao3")
+        self.assertEqual(page.photon.counter_edit.text(), "Dev9/ctr0")
+
+    def test_connected_channel_matches_display(self):
+        """设备通道与界面显示必须一致（不能界面 Dev9、设备 Dev1）。"""
+        from unittest.mock import patch as _patch
+        from PySide6.QtWidgets import QDialog
+        from ui.widgets.device_selector import ConnectionDialog
+
+        page = self.page
+        page.selector.device_box.setCurrentIndex(self._placeholder_index)
+        self.app.processEvents()
+
+        with _patch.object(ConnectionDialog, "exec",
+                           return_value=QDialog.DialogCode.Accepted), \
+             _patch.object(ConnectionDialog, "result_config",
+                           return_value=("local", {"resource": "Dev9"})):
+            page.selector.edit_connection()
+        self.app.processEvents()
+
+        self.connect()
+        self.assertEqual(page._main_device.channel,
+                         page.analog_a.channel_edit.text())
+        self.assertEqual(getattr(page._second_device, "channel", None),
+                         page.analog_b.channel_edit.text())
+        self.assertTrue(page._main_device.channel.startswith("Dev9/"),
+                        page._main_device.channel)
+
+    # ---- #2 任务所有权 ----
+    def test_stop_if_still_ignores_stale_token(self):
+        """过期 token 不能停掉后来者启动的任务。"""
+        from core.nidaq import PlaceholderPulseGenerator
+        from core.transport import LocalTransport
+
+        dev = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        dev.connect()
+        dev.start(1000, 25)              # token 1
+        dev.start(2000, 25)              # token 2
+        stale = dev.last_token
+        dev.start(3000, 25)              # token 3
+
+        dev.stop_if_still(stale)
+        self.assertEqual(dev.last_params, (3000.0, 25.0),
+                         "过期 token 把新任务停了")
+        self.assertIn("Pulsing", dev.status_text())
+
+        dev.stop_if_still(dev.last_token)
+        self.assertIsNone(dev.last_params)
+        dev.close()
+
+    def test_start_returns_its_own_token(self):
+        """start() 必须把 token 直接返回，不能靠共享的 last_token。
+
+        连续 Apply 时 last_token 已经被后来的 start 改掉了，读它会
+        「撤销自己」变成「撤销别人」。
+        """
+        from core.nidaq import PlaceholderPulseGenerator
+        from core.transport import LocalTransport
+
+        dev = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        dev.connect()
+        _f, _d, first_token = dev.start(1000, 25)
+        _f2, _d2, second_token = dev.start(2000, 25)
+        self.assertGreater(second_token, first_token)
+        dev.close()
+
+    def test_stale_ui_start_does_not_stop_newer_task(self):
+        """旧 start 已建立任务、检查尚未执行时，新任务不能被它停掉。"""
+        import threading
+        from unittest.mock import patch as _patch
+        from ui.widgets.daq_panels import PulsePanel
+
+        class GatedPulse:
+            def __init__(self):
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+                self._start_token = 0
+                self.last_token = 0
+                self.stopped_by = []
+                self.entered = threading.Event()
+                self.gate = None
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self._start_token += 1
+                self.last_token = self._start_token
+                self.last_params = (f, d)
+                token = self._start_token
+                if self.gate is not None:
+                    self.entered.set()
+                    self.gate.wait(10)     # 卡在「启动完成、检查未做」
+                return f, d, token
+
+            def stop_if_still(self, token):
+                self.stopped_by.append(token)
+                if token != self._start_token:
+                    return None
+                self.last_params = None
+                return None
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                if self.last_params is None:
+                    return "Idle (pulse not running)"
+                f, d = self.last_params
+                return f"Pulsing on {self.counter}: {f:g} Hz, {d:g} % duty"
+
+        panel = PulsePanel()
+        fake = GatedPulse()
+        panel.set_device(fake)
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with _patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.freq_spin.setValue(2000.0)
+            panel.start()
+        old_work, old_done, _f = pending[0]
+
+        fake.gate = threading.Event()
+        thread = threading.Thread(target=lambda: old_done(old_work()),
+                                  daemon=True)
+        thread.start()
+        self.assertTrue(fake.entered.wait(5), "旧操作没进到 start")
+
+        pending.clear()
+        with _patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.freq_spin.setValue(3000.0)
+            panel.start()
+        new_work, new_done, _f = pending[0]
+        new_done(new_work())
+        self.app.processEvents()
+        self.assertEqual(fake.last_params, (3000.0, 25.0))
+
+        fake.gate.set()
+        thread.join(6)
+        self.app.processEvents()
+
+        self.assertEqual(fake.stopped_by, [1], "旧操作没有用自己的 token")
+        self.assertEqual(fake.last_params, (3000.0, 25.0),
+                         "旧操作的撤销停掉了新任务")
+        self.assertIn("Pulsing", panel.status_label.text())
+        panel.interrupt()
 
     def test_dual_outputs_apply(self):
         page = self.page

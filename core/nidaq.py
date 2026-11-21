@@ -398,6 +398,10 @@ class PhotonCounter:
         self._lock = threading.RLock()
         self._task = None
         self._connected = False
+        #: 每 start 一次递增，用来标识「这次启动的那个任务」
+        self._start_token = 0
+        #: 最近一次 start 的 token（调用方用它做定向撤销）
+        self.last_token = 0
 
     def _log(self, msg: str) -> None:
         if self._log_cb is not None:
@@ -452,8 +456,12 @@ class PhotonCounter:
             self._task = None
             self._log("Counter task released")
 
-    def start(self, counter: str | None = None, source: str | None = None) -> int:
-        """创建边沿计数任务并开始计数，返回起始累计值。"""
+    def start(self, counter: str | None = None,
+              source: str | None = None) -> tuple[int, int]:
+        """创建边沿计数任务并开始计数。
+
+        返回 ``(起始累计值, token)``；token 标识这次启动的任务。
+        """
         if not self._connected:
             raise NIError("Photon counter is not connected")
         with self._lock:
@@ -480,9 +488,12 @@ class PhotonCounter:
                     f"could not start counting on {self.counter} "
                     f"(source {self.source}): {exc}") from exc
             self._task = task
+            self._start_token += 1
+            self.last_token = self._start_token
+            token = self._start_token
         first = self.read()
         self._log(f"Counting on {self.counter}, source {self.source}")
-        return first
+        return first, token
 
     def read(self) -> int:
         """读当前累计边沿数（未处理的原始值）。"""
@@ -504,6 +515,17 @@ class PhotonCounter:
         if delta < 0:
             delta += PhotonCounter.COUNTER_MAX
         return delta
+
+    def stop_if_still(self, token: int) -> str | None:
+        """只有当当前任务**还是** token 对应的那个时才停。
+
+        取消一个过期的 start 时不能无条件 stop()：那会把后来者刚建好的
+        任务一起停掉，而那个任务的界面还显示「在跑」。
+        """
+        with self._lock:
+            if token != self._start_token:
+                return None
+        return self.stop()
 
     def stop(self) -> str | None:
         """停止计数并释放 task；返回错误信息（没有则 None）。"""
@@ -540,6 +562,8 @@ class PlaceholderPhotonCounter:
         self._running = False
         self._t0 = 0.0
         self._count = 0
+        self._start_token = 0
+        self.last_token = 0
 
     def _log(self, msg: str) -> None:
         if self._log_cb is not None:
@@ -569,7 +593,8 @@ class PlaceholderPhotonCounter:
             raise ValueError(f"Not a valid integration time: {value!r}") from exc
         return min(max(seconds, self.BIN_MIN), self.BIN_MAX)
 
-    def start(self, counter: str | None = None, source: str | None = None) -> int:
+    def start(self, counter: str | None = None,
+              source: str | None = None) -> tuple[int, int]:
         import time as _time
         if counter:
             self.counter = counter.strip()
@@ -578,9 +603,12 @@ class PlaceholderPhotonCounter:
         self._t0 = _time.perf_counter()
         self._count = 0
         self._running = True
+        self._start_token += 1
+        self.last_token = self._start_token
+        token = self._start_token
         self._log(f"Placeholder counting on {self.counter} "
                   f"(source {self.source}), ~{self.RATE:,.0f} cps")
-        return 0
+        return 0, token
 
     def read(self) -> int:
         import random
@@ -597,6 +625,11 @@ class PlaceholderPhotonCounter:
     @staticmethod
     def count_delta(previous: int, current: int) -> int:
         return PhotonCounter.count_delta(previous, current)
+
+    def stop_if_still(self, token: int) -> str | None:
+        if token != self._start_token:
+            return None
+        return self.stop()
 
     def stop(self) -> str | None:
         self._running = False
@@ -625,6 +658,10 @@ class PulseGenerator:
         self._connected = False
         #: 当前正在输出的参数；None 表示没在输出
         self.last_params: tuple[float, float] | None = None
+        #: 每 start 一次递增，用来标识「这次启动的那个任务」
+        self._start_token = 0
+        #: 最近一次 start 的 token（调用方用它做定向撤销）
+        self.last_token = 0
 
     def _log(self, msg: str) -> None:
         if self._log_cb is not None:
@@ -688,8 +725,13 @@ class PulseGenerator:
             self._task = None
             self._log("Pulse task released")
 
-    def start(self, freq, duty, counter: str | None = None) -> tuple[float, float]:
-        """启动脉冲串；已经在跑就先干净地重启。返回实际采用的参数。"""
+    def start(self, freq, duty,
+              counter: str | None = None) -> tuple[float, float, int]:
+        """启动脉冲串；已经在跑就先干净地重启。
+
+        返回 ``(freq, duty, token)``。token 用来标识**这次**启动的任务，
+        取消一个过期操作时靠它判断「该不该撤销」。
+        """
         if not self._connected:
             raise NIError("Pulse generator is not connected")
         f, d = self.check_params(freq, duty)
@@ -715,9 +757,27 @@ class PulseGenerator:
                 raise NIError(
                     f"could not start pulses on {self.counter}: {exc}") from exc
             self._task = task
+            self._start_token += 1
+            self.last_token = self._start_token
+            token = self._start_token
         self.last_params = (f, d)
         self._log(f"Pulsing on {self.counter}: {f:g} Hz, {d:g} % duty")
-        return f, d
+        # token 必须随返回值一起给出：读 self.last_token 是不可靠的，
+        # 另一个 start 可能已经把它改掉了（连续 Apply 时就会发生），
+        # 于是「撤销自己」变成「撤销别人」。
+        return f, d, token
+
+    def stop_if_still(self, token: int) -> str | None:
+        """只有当当前任务**还是** token 对应的那个时才停。
+
+        连续 Apply 时，旧操作发现自己的编号过期了，于是「撤销」自己启动
+        的任务 —— 但那时候新任务已经把它顶掉了，无条件 stop() 停掉的是
+        新任务，界面却还显示在跑。
+        """
+        with self._lock:
+            if token != self._start_token:
+                return None
+        return self.stop()
 
     def stop(self) -> str | None:
         """停止脉冲串；返回错误信息（没有则 None）。"""
@@ -758,6 +818,8 @@ class PlaceholderPulseGenerator:
         self._log_cb = log_callback
         self._connected = False
         self.last_params: tuple[float, float] | None = None
+        self._start_token = 0
+        self.last_token = 0
 
     def _log(self, msg: str) -> None:
         if self._log_cb is not None:
@@ -783,13 +845,22 @@ class PlaceholderPulseGenerator:
     def check_params(self, freq, duty) -> tuple[float, float]:
         return PulseGenerator.check_params(self, freq, duty)
 
-    def start(self, freq, duty, counter: str | None = None) -> tuple[float, float]:
+    def start(self, freq, duty,
+              counter: str | None = None) -> tuple[float, float, int]:
         f, d = self.check_params(freq, duty)
         if counter:
             self.counter = counter.strip()
         self.last_params = (f, d)
+        self._start_token += 1
+        self.last_token = self._start_token
+        token = self._start_token
         self._log(f"Placeholder pulsing on {self.counter}: {f:g} Hz, {d:g} % duty")
-        return f, d
+        return f, d, token
+
+    def stop_if_still(self, token: int) -> str | None:
+        if token != self._start_token:
+            return None
+        return self.stop()
 
     def stop(self) -> str | None:
         self.last_params = None

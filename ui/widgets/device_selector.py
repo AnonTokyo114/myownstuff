@@ -413,6 +413,8 @@ class DeviceSelector(QFrame):
     """Device 下拉 + Connection 按钮 + Connect/Disconnect。"""
 
     connected = Signal(object)
+    #: 连接参数（端口/地址/资源名）被改过
+    connection_changed = Signal()
     failed = Signal(str)
     log = Signal(str)
     disconnected = Signal()
@@ -596,6 +598,8 @@ class DeviceSelector(QFrame):
         self._configs[kind] = params
         self._save_configs()          # 记住这次的选择，下次打开就是这个
         self._refresh_conn_button()
+        # 通知外部：资源名/端口变了，依赖它的默认值该跟着更新
+        self.connection_changed.emit()
         self.log.emit("Connection set to " + dialog.summary())
 
     # ==================================================================

@@ -134,6 +134,8 @@ class DaqPage(QWidget):
         # 设备下拉一换（比如 Dev1 -> Dev9），自动填的通道名要跟着变
         self.selector.device_box.currentIndexChanged.connect(
             lambda *_: self._sync_defaults())
+        # 连接设置里改资源名不会触发型号下拉，要单独听
+        self.selector.connection_changed.connect(self._sync_defaults)
         self._sync_defaults(force=True)
 
     # ------------------------------------------------------------------ 工具
@@ -148,6 +150,10 @@ class DaqPage(QWidget):
         resource 字段，结果永远是 None，用户写的 Dev9/ao0 就被 ao2
         覆盖了。
         """
+        # **先**把默认通道同步成当前资源，再读输入框。之前是在设备建好
+        # 之后才同步，结果 device.channel 停在旧的 Dev1/ao2，而界面已经
+        # 显示 Dev9/ao2 —— 看起来对，实际建在别的板卡上。
+        self._sync_defaults()
         channel = self.analog_a.channel_edit.text().strip()
         return {"log_callback": self.log_line.emit,
                 "channel": channel or None}
@@ -225,6 +231,8 @@ class DaqPage(QWidget):
     # ------------------------------------------------------------------ 连接
     def _on_connected(self, device) -> None:
         self._main_device = device
+        # 再同步一次：第二路要用和主设备同一份配置快照
+        self._sync_defaults()
         resource = getattr(device, "resource", "Dev1")
 
         # 第一路：面板上填的就是要用的通道；空着才退回默认

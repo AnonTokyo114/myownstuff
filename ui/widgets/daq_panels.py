@@ -601,15 +601,22 @@ class PhotonPanel(QWidget):
         def work():
             if generation != self._generation:
                 return None                      # 已被 Stop 取消
-            first = dev.start(
+            started = dev.start(
                 counter=self.counter_edit.text().strip() or None,
                 source=self.source_edit.text().strip() or None)
+            # start() 返回 (起始值, token)：token 必须来自返回值，读
+            # dev.last_token 会被别的 start 改掉
+            first, token = started
             if generation != self._generation:
-                # 启动过程中被 Stop 了：撤销，别留下在跑的计数器
-                try:
-                    dev.stop()
-                except Exception:                # noqa: BLE001
-                    pass
+                # 启动过程中被 Stop 了：撤销，但**只撤销自己启动的那个**。
+                # 无条件 stop() 会把后来者刚建好的任务一起停掉，而那个
+                # 任务的界面还显示「在跑」。
+                stopper = getattr(dev, "stop_if_still", None)
+                if callable(stopper):
+                    try:
+                        stopper(token)
+                    except Exception:            # noqa: BLE001
+                        pass
                 return None
             return first
 
@@ -965,17 +972,20 @@ class PulsePanel(QWidget):
         def work():
             if generation != self._generation:
                 return None                      # 已被 Stop 取消
-            params = dev.start(
+            f_out, d_out, token = dev.start(
                 freq, duty,
                 counter=self.counter_edit.text().strip() or None)
             if generation != self._generation:
-                # 启动过程中被 Stop 了：立刻撤销，不然会留下在跑的脉冲
-                try:
-                    dev.stop()
-                except Exception:                # noqa: BLE001
-                    pass
+                # 过期了：只撤销**自己启动的那个**任务。连续 Apply 时，
+                # 新任务已经把它顶掉了，无条件 stop() 停的是新任务。
+                stopper = getattr(dev, "stop_if_still", None)
+                if callable(stopper):
+                    try:
+                        stopper(token)
+                    except Exception:            # noqa: BLE001
+                        pass
                 return None
-            return params
+            return (f_out, d_out)
 
         def done(params) -> None:
             if generation != self._generation or params is None:
