@@ -21,7 +21,16 @@ from core.filterwheel import (          # noqa: E402
     PlaceholderFilterWheel,
     ThorlabsFW102C,
 )
-from core.nidaq import NIDaqDevice, PlaceholderDaq, StopResult  # noqa: E402
+from core.nidaq import (  # noqa: E402
+    NIError,
+    NIDaqDevice,
+    PhotonCounter,
+    PlaceholderDaq,
+    PlaceholderPhotonCounter,
+    PlaceholderPulseGenerator,
+    PulseGenerator,
+    StopResult,
+)
 from core.stage import ASIHalted, ASI_lx_4000  # noqa: E402
 from core.transport import LocalTransport, Transport  # noqa: E402
 
@@ -164,6 +173,98 @@ def _make_daq(task):
     dev.last_applied = 3.0
     dev.warned = False
     return dev
+
+
+class TestPhotonCounter(unittest.TestCase):
+    """计数器回绕与积分时间夹取。"""
+
+    def test_count_delta_basic(self):
+        self.assertEqual(PhotonCounter.count_delta(100, 150), 50)
+
+    def test_count_delta_rollover(self):
+        """32 位计数器回绕：2**32-5 -> 3 应该是 8，不是负数。"""
+        self.assertEqual(PhotonCounter.count_delta(2 ** 32 - 5, 3), 8)
+
+    def test_count_delta_zero(self):
+        self.assertEqual(PhotonCounter.count_delta(1000, 1000), 0)
+
+    def test_bin_clamped(self):
+        pc = PlaceholderPhotonCounter(LocalTransport("Dev1"))
+        pc.connect()
+        self.assertEqual(pc.clamp_bin(0.001), PhotonCounter.BIN_MIN)
+        self.assertEqual(pc.clamp_bin(1e6), PhotonCounter.BIN_MAX)
+        self.assertEqual(pc.clamp_bin(1.0), 1.0)
+        with self.assertRaises(ValueError):
+            pc.clamp_bin("abc")
+        pc.close()
+
+    def test_placeholder_counts_up(self):
+        """占位计数器要真的累积，否则界面永远画不出曲线。"""
+        import time
+        pc = PlaceholderPhotonCounter(LocalTransport("Dev1"))
+        pc.connect()
+        pc.start()
+        first = pc.read()
+        time.sleep(0.2)
+        second = pc.read()
+        self.assertGreater(second, first)
+        pc.close()
+
+    def test_read_before_start_raises(self):
+        pc = PlaceholderPhotonCounter(LocalTransport("Dev1"))
+        pc.connect()
+        with self.assertRaises(NIError):
+            pc.read()
+        pc.close()
+
+
+class TestPulseGenerator(unittest.TestCase):
+    """脉冲参数校验与占位行为。"""
+
+    def test_valid_params(self):
+        pg = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        pg.connect()
+        self.assertEqual(pg.check_params(1000, 25), (1000.0, 25.0))
+        pg.close()
+
+    def test_frequency_bounds(self):
+        pg = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        pg.connect()
+        with self.assertRaises(ValueError):
+            pg.check_params(0, 25)
+        with self.assertRaises(ValueError):
+            pg.check_params(2_000_000, 25)
+        pg.close()
+
+    def test_duty_bounds(self):
+        pg = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        pg.connect()
+        for bad in (0, 100, -5, 101):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                pg.check_params(1000, bad)
+        pg.close()
+
+    def test_start_stop_status(self):
+        pg = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        pg.connect()
+        self.assertIn("not running", pg.status_text())
+        pg.start(2500, 30)
+        self.assertEqual(pg.last_params, (2500.0, 30.0))
+        self.assertIn("2500", pg.status_text())
+        self.assertIn("30", pg.status_text())
+        self.assertIsNone(pg.stop())
+        self.assertIsNone(pg.last_params)
+        self.assertIn("not running", pg.status_text())
+        pg.close()
+
+    def test_non_numeric_params_rejected(self):
+        pg = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+        pg.connect()
+        with self.assertRaises(ValueError):
+            pg.check_params("abc", 25)
+        with self.assertRaises(ValueError):
+            pg.check_params(1000, None)
+        pg.close()
 
 
 class TestDaqUnknownState(unittest.TestCase):
