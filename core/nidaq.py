@@ -521,11 +521,15 @@ class PhotonCounter:
 
         取消一个过期的 start 时不能无条件 stop()：那会把后来者刚建好的
         任务一起停掉，而那个任务的界面还显示「在跑」。
+
+        检查和停止必须在**同一把锁**里完成（_lock 是 RLock，可以重入）。
+        分开写的话，中间新 start() 能抢到锁建好新任务，随后旧 stop()
+        停的就是那个新任务 —— 这正是「已检查通过、尚未停止」的窗口。
         """
         with self._lock:
             if token != self._start_token:
                 return None
-        return self.stop()
+            return self.stop()
 
     def stop(self) -> str | None:
         """停止计数并释放 task；返回错误信息（没有则 None）。"""
@@ -773,11 +777,15 @@ class PulseGenerator:
         连续 Apply 时，旧操作发现自己的编号过期了，于是「撤销」自己启动
         的任务 —— 但那时候新任务已经把它顶掉了，无条件 stop() 停掉的是
         新任务，界面却还显示在跑。
+
+        检查和停止必须在**同一把锁**里完成（_lock 是 RLock，可以重入）。
+        分开写的话，中间新 start() 能抢到锁建好新任务，随后旧 stop()
+        停的就是那个新任务。
         """
         with self._lock:
             if token != self._start_token:
                 return None
-        return self.stop()
+            return self.stop()
 
     def stop(self) -> str | None:
         """停止脉冲串；返回错误信息（没有则 None）。"""

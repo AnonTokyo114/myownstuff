@@ -551,6 +551,161 @@ class DaqPageTest(unittest.TestCase):
         self.assertIn("Pulsing", panel.status_label.text())
         panel.interrupt()
 
+    # ---- #1 stop_if_still 的检查与停止必须原子 ----
+    def test_stop_if_still_is_atomic_under_concurrency(self):
+        """撤销旧 token 与新 start 并发时，新任务不能被误停。
+
+        旧实现先取锁检查、放锁、再 stop()；中间新 start() 能抢到锁建好
+        新任务，随后旧 stop() 停的就是它。
+        """
+        import threading
+        from core.nidaq import PlaceholderPulseGenerator
+        from core.transport import LocalTransport
+
+        bad = 0
+        for _ in range(50):
+            dev = PlaceholderPulseGenerator(LocalTransport("Dev1"))
+            dev.connect()
+            dev.start(1000, 25)
+            stale = dev.last_token
+            barrier = threading.Barrier(2)
+
+            def stopper():
+                barrier.wait()
+                dev.stop_if_still(stale)
+
+            def starter():
+                barrier.wait()
+                dev.start(2000, 25)
+
+            t1 = threading.Thread(target=stopper, daemon=True)
+            t2 = threading.Thread(target=starter, daemon=True)
+            t1.start(); t2.start()
+            t1.join(5); t2.join(5)
+            if dev.last_params != (2000.0, 25.0):
+                bad += 1
+            dev.close()
+        self.assertEqual(bad, 0, f"{bad} 轮里新任务被旧撤销停掉了")
+
+    # ---- #2 断开重连要使在途 Apply 失效 ----
+    def test_reconnect_invalidates_pending_apply(self):
+        """断连后在途 Apply 的完成回调不能改写新连接的界面。"""
+        from ui.widgets.daq_panels import PulsePanel
+
+        class Gated:
+            def __init__(self):
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+                self._start_token = 0
+                self.last_token = 0
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self._start_token += 1
+                self.last_token = self._start_token
+                self.last_params = (f, d)
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                if token != self._start_token:
+                    return None
+                self.last_params = None
+                return None
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                if self.last_params is None:
+                    return "Idle (pulse not running)"
+                f, d = self.last_params
+                return f"Pulsing on {self.counter}: {f:g} Hz, {d:g} % duty"
+
+        page = self.page
+        self.connect()
+        gated = Gated()
+        page.pulse.set_device(gated)
+        page.pulse.freq_spin.setValue(2000.0)
+
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            page.pulse.start()
+
+        old_work, old_done, _f = pending[0]
+        result = old_work()          # 旧设备已启动，回调还没跑
+        self.app.processEvents()
+        self.assertEqual(gated.last_params, (2000.0, 25.0))
+        self.assertNotIn("Pulsing", page.pulse.status_label.text())
+
+        # 断开 -> 重连（设备换了，会话编号也变了）
+        page.selector._on_disconnect()
+        self.pump(15.0, lambda: page.selector.device is None)
+        self.connect()
+
+        old_generation = page.pulse._generation
+        old_done(result)             # 旧回调现在才来
+        self.app.processEvents()
+
+        self.assertNotIn("Pulsing", page.pulse.status_label.text(),
+                         "旧结果污染了重连后的界面")
+        self.assertFalse(page.pulse._running)
+        self.assertIsNone(getattr(page._pulse_device, "last_params", None))
+
+    def test_pending_apply_still_works_without_reconnect(self):
+        """没断开时，回调要正常生效（别把修复做成一律丢弃）。"""
+        from ui.widgets.daq_panels import PulsePanel
+
+        class Simple:
+            def __init__(self):
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+                self._start_token = 0
+                self.last_token = 0
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self._start_token += 1
+                self.last_token = self._start_token
+                self.last_params = (f, d)
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                return None
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                return "fake"
+
+        panel = PulsePanel()
+        dev = Simple()
+        panel.set_device(dev)
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.start()
+
+        work, done, _f = pending[0]
+        done(work())
+        self.app.processEvents()
+        self.assertTrue(panel._running)
+        self.assertIn("Pulsing", panel.status_label.text())
+        panel.interrupt()
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

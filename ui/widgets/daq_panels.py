@@ -554,6 +554,10 @@ class PhotonPanel(QWidget):
         没启动过；同时 _running 残留会让 Start 按钮一直灰着，新连接
         没法马上开始计数。
         """
+        # 连接会话变了：在途的异步操作必须全部作废，否则它们的回调会把
+        # 旧设备的结果写到新连接的界面上（旧 Apply 显示 Pulsing，而新
+        # 设备其实 Idle）。
+        self._generation += 1
         if device is None and (self._running or self._timer.isActive()):
             self.interrupt()
         self._device = device
@@ -597,10 +601,11 @@ class PhotonPanel(QWidget):
 
         self._generation += 1
         generation = self._generation
+        bound = dev                              # 这次操作绑定的设备
 
         def work():
-            if generation != self._generation:
-                return None                      # 已被 Stop 取消
+            if generation != self._generation or bound is not self._device:
+                return None                      # 已被 Stop / 解绑取消
             started = dev.start(
                 counter=self.counter_edit.text().strip() or None,
                 source=self.source_edit.text().strip() or None)
@@ -621,8 +626,9 @@ class PhotonPanel(QWidget):
             return first
 
         def done(first) -> None:
-            if generation != self._generation or first is None:
-                return                           # 过期 / 已取消
+            if (generation != self._generation or first is None
+                    or bound is not self._device):
+                return                           # 过期 / 已取消 / 换了设备
             self._reset_data()
             self._prev_count = int(first)
             self._t0 = self._prev_time = time.perf_counter()
@@ -639,7 +645,7 @@ class PhotonPanel(QWidget):
             self._timer.start(max(50, int(bin_time * 1000)))
 
         def failed(msg: str) -> None:
-            if generation != self._generation:
+            if generation != self._generation or bound is not self._device:
                 return                           # 过期失败，不打扰用户
             self.status_label.setText(f"Error (counting not running): {msg}")
             self.log_line.emit(f"Photon counting failed: {msg}")
@@ -938,6 +944,8 @@ class PulsePanel(QWidget):
     # ------------------------------------------------------------------
     def set_device(self, device) -> None:
         """绑定/解绑设备；解绑时清掉陈旧的运行标志。"""
+        # 连接会话变了：在途操作全部作废
+        self._generation += 1
         if device is None and self._running:
             self.interrupt()
         self._device = device
@@ -968,10 +976,11 @@ class PulsePanel(QWidget):
 
         self._generation += 1
         generation = self._generation
+        bound = dev                              # 这次操作绑定的设备
 
         def work():
-            if generation != self._generation:
-                return None                      # 已被 Stop 取消
+            if generation != self._generation or bound is not self._device:
+                return None                      # 已被 Stop / 解绑取消
             f_out, d_out, token = dev.start(
                 freq, duty,
                 counter=self.counter_edit.text().strip() or None)
@@ -988,8 +997,9 @@ class PulsePanel(QWidget):
             return (f_out, d_out)
 
         def done(params) -> None:
-            if generation != self._generation or params is None:
-                return                           # 过期 / 已取消
+            if (generation != self._generation or params is None
+                    or bound is not self._device):
+                return                           # 过期 / 已取消 / 换了设备
             f, d = params
             self._running = True
             self.status_label.setText(
@@ -1001,7 +1011,7 @@ class PulsePanel(QWidget):
             self._update_controls()
 
         def failed(msg: str) -> None:
-            if generation != self._generation:
+            if generation != self._generation or bound is not self._device:
                 return                           # 过期失败，不打扰用户
             self._running = False
             self.status_label.setText(f"Error (pulse not running): {msg}")
