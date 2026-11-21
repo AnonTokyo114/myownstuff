@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from core import calculus_numeric as cn
 from core import calculus_symbolic as cs
 from core import latex_render as lr
+from ui.workers import run_async
 
 # 画图是可选的：没装 matplotlib 时 Taylor 页照样能算，只是不出图
 try:
@@ -519,6 +520,8 @@ class TaylorTab(_BaseTab):
         self.expr = _expr_field("e.g.  sin(x)   or  exp(x)   or  1/(1-x)")
         self.var = _var_field("x")
         self.assume = _assumption_combo()
+        #: 计算请求编号：连续点 Compute 时只接受最后一次的结果
+        self._request = 0
 
         self.center = QLineEdit("0")
         self.center.setPlaceholderText("e.g. 0, pi/2, 1")
@@ -598,8 +601,13 @@ class TaylorTab(_BaseTab):
             self.figure.clear()
             self.canvas.draw_idle()
 
-    def _draw(self, expr, var, poly, center_value, tol, order) -> list[str]:
-        """画 f 与 P_n，并在下面画误差曲线。返回要追加到结果里的说明。"""
+    def _draw(self, expr, var, poly, center_value, tol, order,
+              radius_info=None) -> list[str]:
+        """画 f 与 P_n，并在下面画误差曲线。返回要追加到结果里的说明。
+
+        ``radius_info`` 是后台线程算好的 ``expansion_holds`` 结果；传 None
+        时才在这里现算（降级路径）。绘图本身必须在 GUI 线程做。
+        """
         if self.figure is None:
             return []
 
@@ -651,9 +659,14 @@ class TaylorTab(_BaseTab):
         self.canvas.draw_idle()
 
         notes: list[str] = []
+        if radius_info is None:
+            try:
+                radius_info = cs.expansion_holds(
+                    expr, var, poly, center_value, tolerance=tol)
+            except Exception as exc:             # noqa: BLE001
+                return [f"Range estimate failed: {type(exc).__name__}: {exc}"]
         try:
-            radius, lo, hi, spread, step = cs.expansion_holds(
-                expr, var, poly, center_value, tolerance=tol)
+            radius, lo, hi, spread, step = radius_info
             if radius > 0:
                 notes.append(
                     f"sampled: error < {tol:g} for "
@@ -678,103 +691,141 @@ class TaylorTab(_BaseTab):
         return notes
 
     def compute(self) -> None:
+        """取输入快照 -> 后台纯计算 -> 回主线程渲染。
+
+        符号求导和误差区间搜索在 20 阶时要几百毫秒，直接放在按钮槽里会
+        卡住整个界面。这里只把**纯计算**挪到后台：QPixmap、Matplotlib
+        画布、控件更新一律留在 GUI 线程。
+        """
         expr = self.expr.text().strip()
         if not expr:
             self.result.show_result(error="Please enter a function first")
             return
 
+        # ---- GUI 线程：一次性快照，后台不再碰控件 ----
         var = self.var.text().strip() or "x"
         center_text = self.center.text().strip() or "0"
         order = self.order.value()
         assumptions = _assumptions_for(self.assume, [var])
-
-        lines: list[str] = []
-        symbolic_text = symbolic_latex = None
-        poly = None
-
-        try:
-            poly, notes = cs.taylor_poly(
-                expr, var, point=center_text, order=order,
-                assumptions=assumptions)
-            symbolic_text = str(poly)
-            symbolic_latex = cs.latex_of(poly)
-            lines.append(f"P_{order}({var}) = {symbolic_text}")
-            for note in notes:
-                lines.append(f"Note: {note}")
-
-            # 累进式：每一阶都在前一阶基础上多一项，看得出收敛过程。
-            # 最后再给带 O() 的完整写法，明确截断在哪里。
-            try:
-                coeffs = cs.coefficient_list(poly, order, center_text)
-                # 用**解析后**的常量构造基底，而且还要处理它自身是加法
-                # 的情况：str(1 + pi/2) 就是 "1 + pi/2"，直接放在减号后面
-                # 会变成 (x - 1 + pi/2) —— 那等于 x - 1 + pi/2，不是
-                # x - (1 + pi/2)。"1+1" 只是恰好化简成 2 才蒙混过关。
-                center_expr = cs.constant_of(center_text)
-                basis = cs.basis_text(var, center_expr)
-
-                lines.append("")
-                lines.append("progressive (one more term each order):")
-                for k in range(order + 1):
-                    partial = cs.format_polynomial(coeffs[:k + 1], basis)
-                    lines.append(f"  P_{k}({var}) = {partial}")
-
-                lines.append("")
-                lines.append(
-                    f"f({var}) = {cs.format_polynomial(coeffs, basis)}"
-                    f" + O({basis}**{order + 1})")
-            except Exception as exc:             # noqa: BLE001
-                lines.append(
-                    f"Term breakdown failed: {type(exc).__name__}: {exc}")
-        except Exception as exc:                 # noqa: BLE001
-            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
-
-        # 可选的数值对比：原函数和展开式在同一点的差
         check_text = self.check.text().strip()
-        if check_text and poly is not None:
-            lines.extend(self._compare(expr, var, poly, check_text))
+        tol = float(self.tol_box.currentData())
 
-        # 画图 + 有效区间
+        self._request += 1
+        request = self._request
+
+        def work():
+            """纯计算，不碰任何 Qt 对象。"""
+            out_lines: list[str] = []
+            symbolic_text = None
+            symbolic_latex = None
+            poly = None
+            radius_info = None
+            center_value = None
+            try:
+                poly, notes = cs.taylor_poly(
+                    expr, var, point=center_text, order=order,
+                    assumptions=assumptions)
+                symbolic_text = str(poly)
+                symbolic_latex = cs.latex_of(poly)
+                out_lines.append(f"P_{order}({var}) = {symbolic_text}")
+                for note in notes:
+                    out_lines.append(f"Note: {note}")
+
+                try:
+                    coeffs = cs.coefficient_list(poly, order, center_text)
+                    basis = cs.basis_text(var, cs.constant_of(center_text))
+                    out_lines.append("")
+                    out_lines.append("progressive (one more term each order):")
+                    for k in range(order + 1):
+                        partial = cs.format_polynomial(coeffs[:k + 1], basis)
+                        out_lines.append(f"  P_{k}({var}) = {partial}")
+                    out_lines.append("")
+                    out_lines.append(
+                        f"f({var}) = {cs.format_polynomial(coeffs, basis)}"
+                        f" + O({basis}**{order + 1})")
+                except Exception as exc:             # noqa: BLE001
+                    out_lines.append(
+                        f"Term breakdown failed: {type(exc).__name__}: {exc}")
+
+                if check_text:
+                    out_lines.extend(
+                        self._compare(expr, var, poly, check_text))
+
+                # 误差区间搜索也重，放后台；绘图只消费结果
+                center_value = cs.constant_float(center_text)
+                radius_info = cs.expansion_holds(
+                    expr, var, poly, center_value, tolerance=tol)
+            except Exception as exc:                 # noqa: BLE001
+                out_lines.append(
+                    f"Symbolic failed: {type(exc).__name__}: {exc}")
+
+            return {
+                "lines": out_lines,
+                "text": symbolic_text,
+                "latex": symbolic_latex,
+                "poly": poly,
+                "radius": radius_info,
+                "center_value": center_value,
+                "tol": tol,
+            }
+
+        def done(data) -> None:
+            if request != self._request:
+                return                       # 有更新的请求，丢弃
+            self._apply_result(expr, var, order, data)
+
+        def failed(msg: str) -> None:
+            if request != self._request:
+                return
+            self.run_btn.setEnabled(True)
+            self.run_btn.setText("Compute")
+            self.result.show_result(error=msg)
+
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText("Computing…")
+        run_async(work, done, failed)
+
+    def _apply_result(self, expr: str, var: str, order: int,
+                      data: dict) -> None:
+        """GUI 线程：画图 + 填结果面板。数据已经在后台算好。"""
+        self.run_btn.setEnabled(True)
+        self.run_btn.setText("Compute")
+
+        out_lines = list(data["lines"])
+        poly = data["poly"]
+        text = data["text"]
+        latex = data["latex"]
+
         if self.figure is not None:
-            if poly is None:
+            if poly is None or data["center_value"] is None:
                 self.figure.clear()
                 self.canvas.draw_idle()
             else:
                 try:
-                    center_value = cs.constant_float(center_text)
-                    tol = float(self.tol_box.currentData())
-                    lines.extend([""])
-                    lines.extend(self._draw(expr, var, poly, center_value,
-                                            tol, order))
-                except Exception as exc:         # noqa: BLE001
-                    lines.append(f"Plot failed: {type(exc).__name__}: {exc}")
+                    out_lines.append("")
+                    out_lines.extend(self._draw(
+                        expr, var, poly, data["center_value"], data["tol"],
+                        order, radius_info=data["radius"]))
+                except Exception as exc:             # noqa: BLE001
+                    out_lines.append(
+                        f"Plot failed: {type(exc).__name__}: {exc}")
 
-        # 按内容行数调数值区高度：累进式是 order 行上下，固定高度会把
-        # 最后一行（带 O() 的完整式子）挤到内部滚动区外看不见。
         try:
-            # 不再设上限：行数多了就让文本框长高，由页面滚动条负责。
-            # 行高用字体的实际行距，不写死像素 —— 写死会在不同 DPI /
-            # 字体下差几行，最后一行又被裁掉。
             metrics = self.result._numeric.fontMetrics()
-            # 乘 2 是必需的，不是保守：QSS 里给 #numericBox 设的 font-size
-            # 不会反映到 widget.font()，所以 fontMetrics().lineSpacing()
-            # 量到的是**旧字体**的行距（约 15px），而实际渲染每行约 28px。
-            # 宁可高一点，也不要差一两行导致最后一行看不见。
             line_height = int(metrics.lineSpacing() * 2.0)
             self.result._numeric.setMinimumHeight(
-                max(220, line_height * len(lines) + 28))
-            # 高度变了要通知布局，否则 QScrollArea 的滚动范围还是旧的
+                max(220, line_height * len(out_lines) + 28))
             self.result._numeric.updateGeometry()
             self.result.updateGeometry()
             self.updateGeometry()
-        except Exception:                        # noqa: BLE001
+        except Exception:                            # noqa: BLE001
             pass
 
-        if symbolic_text is None:
-            self.result.show_result(error="\n".join(lines))
+        if text is None:
+            self.result.show_result(error="\n".join(out_lines))
             return
-        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
-                                numeric="\n".join(lines))
+        self.result.show_result(latex=latex, text=text,
+                                numeric="\n".join(out_lines))
 
     @staticmethod
     def _compare(expr: str, var: str, poly, point_text: str) -> list[str]:
