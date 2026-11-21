@@ -175,6 +175,52 @@ def _make_daq(task):
     return dev
 
 
+class TestCsvSniff(unittest.TestCase):
+    """CSV 先嗅探分隔符再用 C 引擎（快一个数量级），兼容性不能丢。"""
+
+    def _write(self, name, text):
+        import tempfile
+        from pathlib import Path
+        path = Path(tempfile.mkdtemp()) / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_comma(self):
+        from core import csvdata
+        p = self._write("a.csv", "a,b,c\n1,2,3\n4,5,6\n")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(df.shape, (2, 3))
+        self.assertEqual(list(df.columns), ["a", "b", "c"])
+
+    def test_semicolon(self):
+        from core import csvdata
+        p = self._write("a.csv", "a;b;c\n1;2;3\n4;5;6\n")
+        self.assertEqual(csvdata.read_table(str(p)).shape, (2, 3))
+
+    def test_tsv(self):
+        from core import csvdata
+        p = self._write("a.tsv", "a\tb\n1\t2\n")
+        self.assertEqual(csvdata.read_table(str(p)).shape, (1, 2))
+
+    def test_quoted_comma_falls_back(self):
+        """引号里有逗号时嗅探可能误判，回退路径必须还能读。"""
+        from core import csvdata
+        p = self._write("a.csv", 'a,b\n"x,y",2\n')
+        df = csvdata.read_table(str(p))
+        self.assertEqual(df.shape, (1, 2))
+
+    def test_sniff_picks_the_right_separator(self):
+        from core import csvdata
+        p = self._write("a.csv", "a;b;c\n1;2;3\n")
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+
+    def test_single_column_returns_none(self):
+        """单列没有分隔符可嗅探，交给回退路径。"""
+        from core import csvdata
+        p = self._write("a.csv", "a\n1\n2\n")
+        self.assertIsNone(csvdata._sniff_sep(str(p)))
+
+
 class TestPhotonCounter(unittest.TestCase):
     """计数器回绕与积分时间夹取。"""
 

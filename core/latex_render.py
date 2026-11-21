@@ -10,6 +10,8 @@
 """
 
 import io
+import threading
+from collections import OrderedDict
 import re
 
 #: 单次渲染允许的最大字符数（防止超长输入卡住）
@@ -53,8 +55,19 @@ def _friendly_error(exc):
     return f"渲染失败：{msg[:200]}"
 
 
+#: 渲染结果缓存（有界 LRU）。key = (公式, 字号, dpi, 颜色)。
+#:
+#: 一次渲染 20 阶展开式要 ~200 ms，而重复渲染同一公式（切标签页、
+#: 重复点 Compute、切换主题再切回来）非常常见。缓存按渲染配置分键，
+#: 所以字号/DPI/颜色变了自然会 miss，不会拿到错图。
+_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+#: 缓存条数上限（每条几十 KB，64 条完全够用）
+CACHE_SIZE = 64
+
+
 def render_latex(latex, *, fontsize=16, dpi=180, color="black"):
-    """把 LaTeX 数学公式渲染成 PNG 字节。
+    """把 LaTeX 数学公式渲染成 PNG 字节（带缓存）。
 
     参数
     ----
@@ -65,9 +78,34 @@ def render_latex(latex, *, fontsize=16, dpi=180, color="black"):
 
     返回
     ----
-    bytes   PNG 数据，可直接给 ft.Image(src=...)
+    bytes   PNG 数据，可直接给 QPixmap / ft.Image
     """
-    s = strip_delimiters(latex)
+    plain = strip_delimiters(latex)
+    key = (plain, int(fontsize), int(dpi), str(color))
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+        if hit is not None:
+            _CACHE.move_to_end(key)
+            return hit
+
+    data = _render_latex_uncached(plain, fontsize=fontsize, dpi=dpi,
+                                  color=color)
+    with _CACHE_LOCK:
+        _CACHE[key] = data
+        _CACHE.move_to_end(key)
+        while len(_CACHE) > CACHE_SIZE:
+            _CACHE.popitem(last=False)
+    return data
+
+
+def clear_cache() -> None:
+    """清空渲染缓存（字体或主题整体切换后可以调一下）。"""
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+def _render_latex_uncached(s: str, *, fontsize=16, dpi=180, color="black"):
+    """真正的渲染过程；输入已去掉 $ 包装。"""
     if not s:
         raise LatexError("Formula is empty")
     if len(s) > MAX_LATEX_LEN:

@@ -34,16 +34,66 @@ LEGEND_LOCS = [
 # ======================================================================
 # 读表
 # ======================================================================
+#: 嗅探分隔符时读的字节数
+SNIFF_BYTES = 8192
+#: 候选分隔符（按常见程度排）
+CANDIDATE_SEPS = (",", ";", "\t", "|")
+
+
+def _sniff_sep(path: str) -> str | None:
+    """从文件开头猜分隔符；猜不出来返回 None。
+
+    只要求「前几行里每行的该字符个数一致且非零」—— 这足以区分逗号、
+    制表符、分号，又不至于被引号里的逗号骗到（那种情况会落到回退路径）。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            sample = fh.read(SNIFF_BYTES)
+    except OSError:
+        return None
+    if not sample.strip():
+        return None
+    lines = [ln for ln in sample.splitlines() if ln.strip()][:5]
+    if not lines:
+        return None
+
+    best: str | None = None
+    best_score = 0
+    for sep in CANDIDATE_SEPS:
+        counts = [ln.count(sep) for ln in lines]
+        if counts[0] == 0 or len(set(counts)) != 1:
+            continue                      # 没出现 / 每行个数不一致
+        score = counts[0] * 10 + len(lines)
+        if score > best_score:
+            best, best_score = sep, score
+    return best
+
+
 def read_table(path: str) -> pd.DataFrame:
     """读 CSV/TSV。
 
-    .tsv 用制表符；否则交给 pandas 自动检测分隔符（engine="python" 才支持
-    sep=None 的嗅探）。读失败直接抛异常，由界面显示。
+    先用一小段样本嗅探分隔符，再用 **C 引擎**读主体。``sep=None`` 只能
+    配 python 引擎，在 200k×4 的文件上大约慢一个数量级（~500 ms 对
+    ~67 ms）。
+
+    嗅探失败、或者 C 引擎读不动（引号里有分隔符之类），一律退回原来的
+    ``sep=None + python`` 自动识别 —— 兼容性和以前一样，只是常见情况快了。
     """
-    sep = "\t" if path.lower().endswith(".tsv") else None
+    if path.lower().endswith(".tsv"):
+        try:
+            return pd.read_csv(path, sep="\t", engine="c")
+        except Exception:                            # noqa: BLE001
+            pass                                     # 退回通用路径
+
+    sep = _sniff_sep(path)
+    if sep is not None:
+        try:
+            return pd.read_csv(path, sep=sep, engine="c")
+        except Exception:                            # noqa: BLE001
+            pass                                     # 嗅探错了，退回自动识别
+
     try:
-        return pd.read_csv(path, sep=sep,
-                           engine="python" if sep is None else "c")
+        return pd.read_csv(path, sep=None, engine="python")
     except Exception as exc:
         raise ValueError(f"Could not read the file:\n\n{exc}") from exc
 

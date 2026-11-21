@@ -119,6 +119,9 @@ class DaqPage(QWidget):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("numericBox")
+        # 只保留最近几千行：长采集时日志会无限增长，
+        # 完整日志应该落盘，界面上留个窗口就够
+        self.log_view.setMaximumBlockCount(3000)
         self.log_view.setFixedHeight(110)
         outer.addWidget(self.log_view)
 

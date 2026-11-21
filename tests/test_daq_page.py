@@ -706,6 +706,75 @@ class DaqPageTest(unittest.TestCase):
         self.assertIn("Pulsing", panel.status_label.text())
         panel.interrupt()
 
+    # ---- Stop 回调也要校验会话 ----
+    def test_stale_stop_callback_ignored(self):
+        """Stop 的回调如果在更新的 start 之后才到，不能把界面改成 Stopped。"""
+        from ui.widgets.daq_panels import PulsePanel
+
+        class Fake:
+            def __init__(self):
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+                self._start_token = 0
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self._start_token += 1
+                self.last_params = (f, d)
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                return None
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                return "fake"
+
+        panel = PulsePanel()
+        fake = Fake()
+        panel.set_device(fake)
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.start()
+        start_work, start_done, _f = pending[0]
+        start_done(start_work())
+        self.app.processEvents()
+        self.assertTrue(panel._running)
+
+        # 提交 Stop（回调暂缓）
+        pending.clear()
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.stop()
+        stop_work, stop_done, _f = pending[0]
+
+        # Stop 还没回调时又 Apply 了一次
+        pending.clear()
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.freq_spin.setValue(2500.0)
+            panel.start()
+        new_work, new_done, _f = pending[0]
+        new_done(new_work())
+        self.app.processEvents()
+        self.assertTrue(panel._running)
+
+        # 旧的 Stop 回调现在才来
+        stop_work()
+        stop_done(None)
+        self.app.processEvents()
+
+        self.assertTrue(panel._running, "旧 Stop 回调把新任务标记成停止了")
+        self.assertIn("Pulsing", panel.status_label.text())
+        panel.interrupt()
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

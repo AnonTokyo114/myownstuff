@@ -1031,11 +1031,17 @@ class PulsePanel(QWidget):
 
         # 递增序号：所有「已提交但还没跑」的 Start 到这里就作废了
         self._generation += 1
+        generation = self._generation
+        bound = dev
 
         def work():
             return dev.stop()
 
         def done(error) -> None:
+            # Stop 的回调同样要校验：它可能在更新的 start 之后才回来，
+            # 那时设备正在跑，把界面设成 Stopped 就又和硬件对不上了。
+            if generation != self._generation or bound is not self._device:
+                return
             self._running = False
             if error:
                 self.status_label.setText(f"Stop reported an error: {error}")
@@ -1046,6 +1052,8 @@ class PulsePanel(QWidget):
             self._update_controls()
 
         def failed(msg: str) -> None:
+            if generation != self._generation or bound is not self._device:
+                return
             self._running = False
             self.status_label.setText(f"Stop failed: {msg}")
             self.log_line.emit(f"Pulse stop failed: {msg}")

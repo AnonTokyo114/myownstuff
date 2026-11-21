@@ -99,6 +99,42 @@ class TestSymbolicFunctions(unittest.TestCase):
         self.assertEqual(txt, "2*n")
 
 
+class TestLatexCache(unittest.TestCase):
+    """公式 PNG 缓存：命中快、配置变了要 miss、有界。"""
+
+    def setUp(self):
+        from core import latex_render
+        self.lr = latex_render
+        self.lr.clear_cache()
+
+    def tearDown(self):
+        self.lr.clear_cache()
+
+    def test_repeat_hit_returns_same_bytes(self):
+        a = self.lr.render_latex("x^{2} + 1")
+        b = self.lr.render_latex("x^{2} + 1")
+        self.assertEqual(a, b)
+        self.assertEqual(len(self.lr._CACHE), 1)
+
+    def test_different_config_misses(self):
+        a = self.lr.render_latex("x^{2}", fontsize=16)
+        b = self.lr.render_latex("x^{2}", fontsize=13)
+        self.assertNotEqual(a, b)
+        self.assertEqual(len(self.lr._CACHE), 2)
+
+    def test_dollar_wrapping_is_normalised(self):
+        """$x$ 和 x 应该命中同一条缓存。"""
+        a = self.lr.render_latex("x")
+        b = self.lr.render_latex("$x$")
+        self.assertEqual(a, b)
+        self.assertEqual(len(self.lr._CACHE), 1)
+
+    def test_cache_is_bounded(self):
+        for i in range(self.lr.CACHE_SIZE + 20):
+            self.lr.render_latex(f"y^{{{i}}}", fontsize=10)
+        self.assertLessEqual(len(self.lr._CACHE), self.lr.CACHE_SIZE)
+
+
 class TestTaylor(unittest.TestCase):
     """泰勒展开。"""
 
