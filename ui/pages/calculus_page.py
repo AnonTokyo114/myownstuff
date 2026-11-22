@@ -191,7 +191,15 @@ class _BaseTab(QWidget):
     def compute(self) -> None:            # pragma: no cover - 由子类覆盖
         raise NotImplementedError
 
-    def clear(self) -> None:              # pragma: no cover
+    def clear(self) -> None:
+        """清空结果，并让在途的后台计算作废。
+
+        所有后台计算的页面共用这一份：递增请求编号后，Clear 之前提交的
+        成功/失败回调都会被丢弃；同时把 Compute 恢复可用，否则慢任务
+        期间用户既清不掉也点不了新的。
+        """
+        self._request += 1
+        self._end_compute()
         self.result.show_result()
 
     # ------------------------------------------------------------------
@@ -679,9 +687,7 @@ class TaylorTab(_BaseTab):
         不递增请求编号的话，点了 Clear 之后旧的后台结果照样会被接受，
         公式和图又自己长回来 —— 用户明明清空了，界面却"复活"。
         """
-        self._request += 1
-        self.run_btn.setEnabled(True)
-        self.run_btn.setText("Compute")
+        # 编号递增和按钮恢复由 _BaseTab.clear 统一处理
         super().clear()
         if self.figure is not None:
             self.figure.clear()

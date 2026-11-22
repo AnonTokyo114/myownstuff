@@ -135,6 +135,40 @@ class TestLatexCache(unittest.TestCase):
         self.assertLessEqual(len(self.lr._CACHE), self.lr.CACHE_SIZE)
 
 
+class TestAllTabsClearInvalidates(unittest.TestCase):
+    """三个后台计算的 tab 在 Clear 后都不能回填旧结果。
+
+    Taylor 早就有这套逻辑，本轮迁移到后台的 Integral / Derivative /
+    Partial 一开始漏了 —— Clear 之后请求编号没变，旧结果照样会填回来。
+    """
+
+    def _app(self):
+        try:
+            import os
+            os.environ.setdefault("QT_API", "pyside6")
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+        except Exception:                        # noqa: BLE001
+            self.skipTest("PySide6 not available")
+        return QApplication.instance() or QApplication([])
+
+    def test_each_tab_clear_bumps_request(self):
+        app = self._app()
+        from ui.pages.calculus_page import (
+            DerivativeTab, IntegralTab, PartialTab, TaylorTab,
+        )
+
+        for cls in (IntegralTab, DerivativeTab, PartialTab, TaylorTab):
+            tab = cls()
+            before = tab._request
+            tab.clear()
+            self.assertEqual(tab._request, before + 1,
+                             f"{cls.__name__}.clear 没有递增请求编号")
+            self.assertTrue(tab.run_btn.isEnabled(),
+                            f"{cls.__name__}.clear 后 Compute 仍不可用")
+            app.processEvents()
+
+
 class TestClearInvalidatesRequest(unittest.TestCase):
     """Clear 必须让在途的后台计算作废，否则结果会自己长回来。
 

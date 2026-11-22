@@ -932,6 +932,106 @@ class DaqPageTest(unittest.TestCase):
         self.assertIs(ph._popout, first, "每次都新建了窗口")
         self.assertTrue(ph._popout.isHidden())
 
+    # ---- 状态衔接 ----
+    def test_reset_clears_running_statistics(self):
+        """开始新一轮时必须把增量统计清零。
+
+        否则第二轮会接着上一轮的总和算均值（Mean 翻倍、Std 归零），
+        而队列和 CSV 里明明只有本轮数据。这条直接测根因，不依赖
+        真实采集时序（那种用例挂在 CI 上容易超时）。
+        """
+        from ui.widgets.daq_panels import PhotonPanel
+
+        panel = PhotonPanel()
+        panel._rate_sum = 12345.0
+        panel._rate_sum_sq = 6.78e7
+        panel._dirty = True
+
+        panel._reset_data()
+
+        self.assertEqual(panel._rate_sum, 0.0)
+        self.assertEqual(panel._rate_sum_sq, 0.0)
+        self.assertFalse(panel._dirty)
+
+    def test_statistics_match_queue_after_reset(self):
+        """重置后重新累加，均值必须等于队列均值。"""
+        import statistics as st
+        from ui.widgets.daq_panels import PhotonPanel
+
+        panel = PhotonPanel()
+        # 模拟第一轮留下的脏数据
+        panel._rate_sum = 99999.0
+        panel._rate_sum_sq = 1e10
+        panel._reset_data()
+
+        # 模拟第二轮的两个点
+        for rate in (10897.0, 13610.0):
+            panel._rates.append(rate)
+            panel._rate_sum += rate
+            panel._rate_sum_sq += rate * rate
+        n = len(panel._rates)
+        self.assertAlmostEqual(panel._rate_sum / n, st.mean(panel._rates),
+                               places=6)
+
+    def test_repaint_targets_visible_canvas_after_dock(self):
+        """收回后必须画主画布，不能继续画隐藏的弹窗。"""
+        page = self.page
+        self.connect()
+        ph = page.photon
+        ph.bin_spin.setValue(0.05)
+        ph.start()
+        self.pump(15.0, lambda: len(ph._log) >= 4)
+        ph.stop()
+        self.pump(5.0, lambda: not ph._running)
+
+        ph.toggle_popout()
+        self.app.processEvents()
+        ph._popout.reject()
+        self.app.processEvents()
+        self.assertTrue(ph._popout.isHidden())
+
+        main_draws = []
+        hidden_draws = []
+        orig_main = ph.canvas.draw
+        orig_hidden = ph._popout.canvas.draw
+
+        ph.canvas.draw = lambda *a, **k: (main_draws.append(1),
+                                          orig_main(*a, **k))
+        ph.canvas.draw_idle = lambda: (main_draws.append(1), orig_main())
+        ph._popout.canvas.draw = lambda *a, **k: (hidden_draws.append(1),
+                                                  orig_hidden(*a, **k))
+        ph._popout.canvas.draw_idle = lambda: (hidden_draws.append(1),
+                                               orig_hidden())
+
+        ph.clear_plot()
+        self.app.processEvents()
+        self.assertGreaterEqual(len(main_draws), 1, "Clear 没画主画布")
+        self.assertEqual(len(hidden_draws), 0, "Clear 画到了隐藏弹窗")
+
+        main_draws.clear()
+        hidden_draws.clear()
+        ph.start()
+        self.pump(15.0, lambda: len(ph._log) >= 4)
+        self.assertGreaterEqual(len(main_draws), 1, "新采集没画主画布")
+        self.assertEqual(len(hidden_draws), 0, "新采集画到了隐藏弹窗")
+        ph.stop()
+
+    def test_cleanup_closes_popout_window(self):
+        """关闭页面时必须释放无父对象的弹出窗口。"""
+        page = self.page
+        self.connect()
+        ph = page.photon
+        ph.toggle_popout()
+        self.app.processEvents()
+        self.assertIsNotNone(ph._popout)
+        window = ph._popout
+
+        page.cleanup()
+        self.app.processEvents()
+
+        self.assertIsNone(ph._popout, "cleanup 后 _popout 没置空")
+        self.assertTrue(window.isHidden(), "弹窗没关")
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

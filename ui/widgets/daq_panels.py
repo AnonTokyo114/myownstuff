@@ -838,13 +838,15 @@ class PhotonPanel(QWidget):
         self._repaint()
 
     def _repaint(self) -> None:
-        """重画曲线：只画当前可见的那个 canvas。
+        """重画曲线：只画**当前可见**的那个 canvas。
 
-        弹出独立窗口时主面板的 canvas 是隐藏的，画它没有意义（而且
-        matplotlib 对同一 figure 的两个 canvas 同时 draw 并不稳）。
+        判断依据必须是「弹出窗口是否真的显示着」，不能是「_popout 指针
+        是否非空」—— 为了复用，收回之后指针仍然保留，用非空判断会一直
+        往一个隐藏的画布上画，可见的主图就再也不更新了。
         """
-        target = (self._popout.canvas if self._popout is not None
-                  else self.canvas)
+        popout_visible = (self._popout is not None
+                          and self._popout.isVisible())
+        target = self._popout.canvas if popout_visible else self.canvas
         if target is not None:
             target.draw_idle()
 
@@ -908,12 +910,21 @@ class PhotonPanel(QWidget):
         self._update_controls()
 
     def _reset_data(self) -> None:
+        """开始新一轮采集 / 清图时的完整重置。
+
+        增量统计（_rate_sum / _rate_sum_sq）必须一起清 —— 否则第二轮
+        会接着上一轮的总和算均值，Mean 直接翻倍。之前只清了队列，靠
+        「先点 Clear」才碰巧正确，正常 Stop -> Start 就会露馅。
+        """
         self._times.clear()
         self._rates.clear()
         self._log = []
         self._prev_count = 0
         self._prev_time = 0.0
         self._t0 = 0.0
+        self._rate_sum = 0.0
+        self._rate_sum_sq = 0.0
+        self._dirty = False
         if self.figure is not None and self.canvas is not None:
             self._line.set_data([], [])
             self._repaint()
@@ -1011,6 +1022,13 @@ class PhotonPanel(QWidget):
         self._timer.stop()
         self._repaint_timer.stop()
         self._running = False
+        # 弹出窗口没有父对象（为了不被父容器持有），页面销毁时不会
+        # 连带关掉它 —— 关掉 DAQ 主界面后它会留在屏幕上，而且因为
+        # quitOnLastWindowClosed 的存在，独立进程还会一直活着。
+        if self._popout is not None:
+            self._popout.hide()
+            self._popout.deleteLater()
+            self._popout = None
         if self._device is not None:
             try:
                 self._device.stop()
