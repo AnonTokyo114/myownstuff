@@ -1032,6 +1032,40 @@ class DaqPageTest(unittest.TestCase):
         self.assertIsNone(ph._popout, "cleanup 后 _popout 没置空")
         self.assertTrue(window.isHidden(), "弹窗没关")
 
+    def test_disconnect_while_popped_out_restores_canvas(self):
+        """弹出状态下断开设备：主画布必须恢复，按钮文案必须回来。
+
+        interrupt() 同时用于「采集中断开」和「最终销毁」。只做
+        hide + deleteLater 会绕开收回流程，主画布一直藏着、按钮还写着
+        Dock plot，重连后图框是空的 —— 而且 Figure.canvas 指向已销毁的
+        弹窗画布。
+        """
+        page = self.page
+        self.connect()
+        ph = page.photon
+        ph.bin_spin.setValue(0.05)
+        ph.start()
+        self.pump(15.0, lambda: len(ph._log) >= 3)
+        self.assertTrue(ph._running)
+
+        ph.toggle_popout()
+        self.app.processEvents()
+        self.assertIsNotNone(ph._popout)
+        figure = ph.figure
+        self.assertIs(figure.canvas, ph._popout.canvas)
+
+        page.selector._on_disconnect()
+        self.pump(15.0, lambda: page.selector.device is None)
+        self.app.processEvents()
+
+        self.assertIsNone(ph._popout, "断开后 _popout 没置空")
+        self.assertFalse(ph.canvas.isHidden(),
+                         "断开后主画布仍是隐藏的")
+        self.assertEqual(ph.popout_btn.text(), "Pop out plot",
+                         "断开后按钮文案没恢复")
+        self.assertIs(figure.canvas, ph.canvas,
+                      "Figure.canvas 没绑回主画布（弹窗销毁后会悬空）")
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

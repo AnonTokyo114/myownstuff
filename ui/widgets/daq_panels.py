@@ -879,10 +879,31 @@ class PhotonPanel(QWidget):
         """弹出窗口关闭 / Esc：恢复主面板（可重复调用）。"""
         if self.canvas is not None:
             self.canvas.setVisible(True)
+            # Figure.canvas 在弹出时被绑到了弹窗的画布上。收回来必须
+            # 重新绑回主画布，否则这个指针会一直指着弹窗的 canvas，
+            # 弹窗一销毁就悬空（figure.canvas.isValid() == False）。
+            try:
+                self.figure.canvas = self.canvas
+            except Exception:                    # noqa: BLE001
+                pass
             self.canvas.draw_idle()
         self.popout_btn.setText("Pop out plot")
         if self._popout is not None:
             self._popout.hide()           # 保留对象，下次复用
+
+    def release_popout(self) -> None:
+        """彻底释放弹出窗口（断开设备 / 销毁页面时调用）。
+
+        不能只 hide + deleteLater：那会绕开 _on_popout_closed，主画布
+        一直藏着、按钮还写着 "Dock plot"、Figure.canvas 指向被删掉的
+        画布。所以先走完整的收回流程，再销毁对象。
+        """
+        if self._popout is None:
+            return
+        window = self._popout
+        self._on_popout_closed()          # 恢复可见性 / 按钮 / canvas 绑定
+        window.deleteLater()
+        self._popout = None
 
     def stop(self) -> None:
         # 递增编号：在途的 start 回调到这里就作废了。不加这一步的话，
@@ -1025,10 +1046,8 @@ class PhotonPanel(QWidget):
         # 弹出窗口没有父对象（为了不被父容器持有），页面销毁时不会
         # 连带关掉它 —— 关掉 DAQ 主界面后它会留在屏幕上，而且因为
         # quitOnLastWindowClosed 的存在，独立进程还会一直活着。
-        if self._popout is not None:
-            self._popout.hide()
-            self._popout.deleteLater()
-            self._popout = None
+        # release_popout 会先走完整收回流程（恢复主画布与按钮），再销毁。
+        self.release_popout()
         if self._device is not None:
             try:
                 self._device.stop()
