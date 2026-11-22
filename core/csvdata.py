@@ -11,6 +11,7 @@
 """
 
 from __future__ import annotations
+import csv
 
 from dataclasses import dataclass, field
 
@@ -64,11 +65,28 @@ def _count_unquoted(line: str, sep: str) -> int:
     return count
 
 
+def _consistent_widths(sample: str, sep: str) -> bool:
+    """按 sep 用 csv.reader 解析，列数是否一致且大于 1。"""
+    try:
+        rows = list(csv.reader(sample.splitlines(), delimiter=sep))
+    except csv.Error:
+        return False
+    rows = [r for r in rows if any(field.strip() for field in r)]
+    if len(rows) < 2:
+        return False
+    widths = {len(r) for r in rows}
+    return len(widths) == 1 and widths.pop() > 1
+
+
 def _sniff_sep(path: str) -> str | None:
     """从文件开头猜分隔符；猜不出来返回 None。
 
-    要求「前几行里每行**引号外**的该字符个数一致且非零」。跨行的
-    引号字段会破坏这个前提，那种情况交给回退路径。
+    **先让标准库的 ``csv.Sniffer`` 判断**：它理解引号和字段边界，而这
+    正是纯字符计数做不到的 —— 分号文件里的字段可以合法包含不加引号的
+    逗号（``name,unit;"value"``），两种分隔符在每行出现次数一样多，按
+    频次根本无法区分。
+
+    Sniffer 失败时退回「引号外计数」，再不行交给调用方的自动识别。
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -77,12 +95,22 @@ def _sniff_sep(path: str) -> str | None:
         return None
     if not sample.strip():
         return None
-    lines = [ln for ln in sample.splitlines() if ln.strip()][:5]
-    if not lines:
+
+    # 跨行引号字段：上半段取到的样本不完整，先交给回退
+    if sample.count('"') % 2:
         return None
 
-    # 引号没闭合（跨行字段）就别猜了
-    if sample.count('"') % 2:
+    # 1) 标准库方言嗅探
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters="".join(CANDIDATE_SEPS))
+        if _consistent_widths(sample, dialect.delimiter):
+            return dialect.delimiter
+    except csv.Error:
+        pass
+
+    # 2) 退回引号外计数（Sniffer 对短样本可能放弃）
+    lines = [ln for ln in sample.splitlines() if ln.strip()][:5]
+    if not lines:
         return None
 
     best: str | None = None
@@ -90,7 +118,7 @@ def _sniff_sep(path: str) -> str | None:
     for sep in CANDIDATE_SEPS:
         counts = [_count_unquoted(ln, sep) for ln in lines]
         if counts[0] == 0 or len(set(counts)) != 1:
-            continue                      # 没出现 / 每行个数不一致
+            continue
         score = counts[0] * 10 + len(lines)
         if score > best_score:
             best, best_score = sep, score

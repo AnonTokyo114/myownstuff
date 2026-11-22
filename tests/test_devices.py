@@ -248,6 +248,58 @@ class TestCsvSniff(unittest.TestCase):
         p = self._write("a.csv", 'a,b\n"x,1\n2,3\n')
         self.assertIsNone(csvdata._sniff_sep(str(p)))
 
+    def test_unquoted_commas_in_semicolon_fields(self):
+        """分号文件里字段可以合法包含**不加引号**的逗号。
+
+        此时逗号和分号在每行出现次数相同，纯频次判断必然选错；必须靠
+        方言嗅探。
+        """
+        from core import csvdata
+        p = self._write(
+            "a.csv",
+            'name,unit;"value"\nsignal,V;"1"\nreference,A;"2"\n')
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(list(df.columns), ["name,unit", "value"])
+        # 第一列的列名就是 "name,unit"，所以它的值也是含逗号的整体
+        self.assertEqual(list(df.iloc[:, 0]), ["signal,V", "reference,A"])
+        self.assertEqual(list(df.iloc[:, 1]), [1, 2])
+
+    def test_three_columns_with_unquoted_commas(self):
+        """三列样例：数值列不能被并成文本列。"""
+        from core import csvdata
+        p = self._write(
+            "a.csv",
+            'name,unit,id;"time";signal\n'
+            'a,b,c;"0";1\n'
+            'd,e,f;"1";2\n')
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(list(df.columns), ["name,unit,id", "time", "signal"])
+        numeric = csvdata.numeric_columns(df)
+        self.assertIn("time", numeric)
+        self.assertIn("signal", numeric)
+        self.assertEqual(list(df["time"]), [0, 1])
+
+    def test_each_common_dialect_matches_explicit_parse(self):
+        """逗号/分号/制表/竖线：嗅探结果要和显式分隔符解析完全一致。"""
+        import pandas as pd
+        from core import csvdata
+
+        samples = {
+            ",": "a,b,c\n1,2,3\n4,5,6\n",
+            ";": "a;b;c\n1;2;3\n4;5;6\n",
+            "\t": "a\tb\tc\n1\t2\t3\n4\t5\t6\n",
+            "|": "a|b|c\n1|2|3\n4|5|6\n",
+        }
+        for sep, body in samples.items():
+            p = self._write(f"a{ord(sep)}.csv", body)
+            got = csvdata.read_table(str(p))
+            want = pd.read_csv(str(p), sep=sep, engine="c")
+            self.assertEqual(list(got.columns), list(want.columns), sep)
+            self.assertEqual(got.shape, want.shape, sep)
+            self.assertEqual(list(got.iloc[:, 0]), list(want.iloc[:, 0]), sep)
+
     def test_sniff_picks_the_right_separator(self):
         from core import csvdata
         p = self._write("a.csv", "a;b;c\n1;2;3\n")
