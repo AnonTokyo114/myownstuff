@@ -16,10 +16,12 @@ import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -101,15 +103,28 @@ class DaqPage(QWidget):
         self.pulse.log_line.connect(self._append_log)
         self.tabs.addTab(self.pulse, "Pulse generator")
 
-        outer.addWidget(self.tabs, 1)
+        # 标签页套滚动区：窗口变小、或者内容（比如光子计数的高图）超过
+        # 可用高度时**滚动**，而不是把图压扁 / 裁掉坐标轴标签。
+        # 之前直接把 QTabWidget 塞进布局，超高就只会裁。
+        self.tab_scroll = QScrollArea()
+        self.tab_scroll.setWidgetResizable(True)
+        self.tab_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.tab_scroll.setWidget(self.tabs)
+        outer.addWidget(self.tab_scroll, 1)
 
-        # ---- 日志 ----
+        # ---- 日志（可折叠：给图腾出高度）----
         log_head = QHBoxLayout()
         log_head.setSpacing(6)
         lab = QLabel("Log")
         lab.setObjectName("fieldLabel")
         log_head.addWidget(lab)
         log_head.addStretch(1)
+        self.log_toggle_btn = QPushButton("Hide log")
+        self.log_toggle_btn.setObjectName("ghost")
+        self.log_toggle_btn.setFixedWidth(90)
+        self.log_toggle_btn.setToolTip(
+            "Hide the log to give the live plot more vertical space")
+        log_head.addWidget(self.log_toggle_btn)
         self.clear_log_btn = QPushButton("Clear")
         self.clear_log_btn.setObjectName("ghost")
         self.clear_log_btn.setFixedWidth(70)
@@ -133,6 +148,7 @@ class DaqPage(QWidget):
         self.selector.failed.connect(
             lambda msg: QApplicationCritical(self, msg))
         self.clear_log_btn.clicked.connect(self.log_view.clear)
+        self.log_toggle_btn.clicked.connect(self._toggle_log)
 
         # 设备下拉一换（比如 Dev1 -> Dev9），自动填的通道名要跟着变
         self.selector.device_box.currentIndexChanged.connect(
@@ -160,6 +176,15 @@ class DaqPage(QWidget):
         channel = self.analog_a.channel_edit.text().strip()
         return {"log_callback": self.log_line.emit,
                 "channel": channel or None}
+
+    def _toggle_log(self) -> None:
+        """收起/展开日志区，把高度让给上面的图。
+
+        窗口不大的时候，日志那 110px 往往正是图缺的高度。
+        """
+        visible = self.log_view.isVisible()
+        self.log_view.setVisible(not visible)
+        self.log_toggle_btn.setText("Show log" if visible else "Hide log")
 
     def _append_log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")

@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -392,6 +393,43 @@ class AnalogChannelPanel(QFrame):
 
 
 # ======================================================================
+# 独立的实时曲线窗口
+# ======================================================================
+class PlotWindow(QDialog):
+    """把实时曲线放进一个独立、可最大化的窗口。
+
+    和主面板**共享同一个 Figure**：弹出期间主面板的 canvas 只是隐藏，
+    数据照采，tick 继续往这个 figure 上喂点，所以窗口里看到的是实时的。
+    这样不需要搬数据，也不会出现「两个图各画各的」。
+    """
+
+    closed = Signal()
+
+    def __init__(self, figure, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Live photon count rate")
+        self.resize(1100, 680)
+        self.setSizeGripEnabled(True)
+
+        self.canvas = FigureCanvas(figure)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        layout.addWidget(self.canvas, 1)
+
+        # 缩放 / 平移 / 存图 —— 长时间跑的时候很有用
+        try:
+            from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+            layout.addWidget(NavigationToolbar2QT(self.canvas, self))
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def closeEvent(self, event) -> None:         # noqa: N802
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+# ======================================================================
 # 光子计数
 # ======================================================================
 class PhotonPanel(QWidget):
@@ -408,6 +446,8 @@ class PhotonPanel(QWidget):
         self._device = None
         self._running = False
         self._saved = True
+        #: Pop out 出来的独立图窗口（None 表示还在主面板里）
+        self._popout = None
 
         self._times: deque[float] = deque()
         self._rates: deque[float] = deque()
@@ -479,7 +519,13 @@ class PhotonPanel(QWidget):
         self.save_btn.setObjectName("ghost")
         self.clear_btn = QPushButton("Clear plot")
         self.clear_btn.setObjectName("ghost")
-        for b in (self.start_btn, self.stop_btn, self.save_btn, self.clear_btn):
+        self.popout_btn = QPushButton("Pop out plot")
+        self.popout_btn.setObjectName("ghost")
+        self.popout_btn.setToolTip(
+            "Open the live plot in its own resizable window (maximise or "
+            "full-screen it for a long run)")
+        for b in (self.start_btn, self.stop_btn, self.save_btn,
+                  self.clear_btn, self.popout_btn):
             btn_row.addWidget(b)
         btn_row.addStretch(1)
         wrap = QWidget()
@@ -517,7 +563,10 @@ class PhotonPanel(QWidget):
             box.setObjectName("formBox")
             box_layout = QVBoxLayout(box)
             box_layout.setContentsMargins(6, 6, 6, 6)
-            self.figure = Figure(figsize=(7.6, 3.4), dpi=100)
+            # constrained 布局：每次 draw 自动为标题/坐标轴标签留空间。
+            # 用 tight_layout() 只在创建时算一次，窗口一缩标签就会被裁。
+            self.figure = Figure(figsize=(7.6, 3.4), dpi=100,
+                                 layout="constrained")
             self._ax = self.figure.add_subplot(111)
             self._ax.set_xlabel("Elapsed (s)")
             self._ax.set_ylabel("Count rate (counts/s)")
@@ -526,9 +575,10 @@ class PhotonPanel(QWidget):
             (self._line,) = self._ax.plot([], [], lw=1.4)
             self._ax.set_xlim(0, self.DEFAULT_WINDOW)
             self._ax.set_ylim(0, 1)
-            self.figure.tight_layout()
             self.canvas = FigureCanvas(self.figure)
-            self.canvas.setMinimumHeight(260)
+            # 给一个够大的下限：宁可让页面滚动，也不要把图压到看不见
+            # x 轴标签。外层是 QScrollArea，所以这里可以直接要高度。
+            self.canvas.setMinimumHeight(460)
             box_layout.addWidget(self.canvas, 1)
             outer.addWidget(box, 1)
         else:
@@ -543,6 +593,7 @@ class PhotonPanel(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.save_btn.clicked.connect(self.save_csv)
         self.clear_btn.clicked.connect(self.clear_plot)
+        self.popout_btn.clicked.connect(self.toggle_popout)
         self._update_controls()
 
     # ------------------------------------------------------------------
@@ -730,7 +781,42 @@ class PhotonPanel(QWidget):
                 margin = 0.05 * (hi - lo)
                 lo, hi = lo - margin, hi + margin
             self._ax.set_ylim(max(0.0, lo), hi)
-        self.canvas.draw_idle()
+        self._repaint()
+
+    def _repaint(self) -> None:
+        """重画曲线：只画当前可见的那个 canvas。
+
+        弹出独立窗口时主面板的 canvas 是隐藏的，画它没有意义（而且
+        matplotlib 对同一 figure 的两个 canvas 同时 draw 并不稳）。
+        """
+        target = (self._popout.canvas if self._popout is not None
+                  else self.canvas)
+        if target is not None:
+            target.draw_idle()
+
+    def toggle_popout(self) -> None:
+        """把实时曲线在主面板和独立窗口之间来回搬。"""
+        if self.figure is None or self.canvas is None:
+            return
+        if self._popout is not None:
+            self._popout.close()
+            return
+
+        self._popout = PlotWindow(self.figure, self)
+        self._popout.closed.connect(self._on_popout_closed)
+        # 主面板的 canvas 收起来；数据仍在采，figure 仍然在更新
+        self.canvas.setVisible(False)
+        self._popout.show()
+        self._popout.raise_()
+        self.popout_btn.setText("Dock plot")
+        self._repaint()
+
+    def _on_popout_closed(self) -> None:
+        self._popout = None
+        if self.canvas is not None:
+            self.canvas.setVisible(True)
+            self.canvas.draw_idle()
+        self.popout_btn.setText("Pop out plot")
 
     def stop(self) -> None:
         self._timer.stop()
