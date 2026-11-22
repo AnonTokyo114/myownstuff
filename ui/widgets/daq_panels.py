@@ -469,6 +469,10 @@ class PhotonPanel(QWidget):
         self._times: deque[float] = deque()
         self._rates: deque[float] = deque()
         self._log: list[tuple] = []
+        #: 窗口内计数率的增量统计（避免每 tick 遍历几万个点）
+        self._rate_sum = 0.0
+        self._rate_sum_sq = 0.0
+        self._dirty = False
         self._prev_count = 0
         self._prev_time = 0.0
         self._t0 = 0.0
@@ -476,6 +480,12 @@ class PhotonPanel(QWidget):
         self._timer = QTimer(self)
         self._timer.setSingleShot(False)
         self._timer.timeout.connect(self._tick)
+        # 重绘单独限速：采样可以 20 Hz，但没必要每采一个点就重画一次 ——
+        # 72000 点时一次重绘要 60 ms，会超过最短的 50 ms 采样周期。
+        self._repaint_timer = QTimer(self)
+        self._repaint_timer.setSingleShot(False)
+        self._repaint_timer.setInterval(125)      # 8 帧/秒
+        self._repaint_timer.timeout.connect(self._flush_repaint)
         #: 操作序号。Stop 递增它，让「已经点过但还没执行」的旧 Start
         #: 立刻失效，否则旧 Start 可能在 Stop 之后又把任务重新启动起来。
         self._generation = 0
@@ -711,6 +721,7 @@ class PhotonPanel(QWidget):
                 f"<- {self.source_edit.text().strip()}")
             self._update_controls()
             self._timer.start(max(50, int(bin_time * 1000)))
+            self._repaint_timer.start()
 
         def failed(msg: str) -> None:
             if generation != self._generation or bound is not self._device:
@@ -723,6 +734,13 @@ class PhotonPanel(QWidget):
         self.status_label.setText("Starting counter…")
         self.busy_changed.emit(True)
         run_async(work, done, failed)
+
+    def _flush_repaint(self) -> None:
+        """重绘节拍：只有攒了新点才真正画一次。"""
+        if not self._dirty or self.figure is None:
+            return
+        self._dirty = False
+        self._draw_curve()
 
     def _tick(self) -> None:
         dev = self._device
@@ -750,13 +768,18 @@ class PhotonPanel(QWidget):
         self._rates.append(rate)
 
         window = max(5.0, self.window_spin.value())
+        # 滑出窗口的点要同时从增量统计里减掉
         while self._times and self._times[0] < elapsed - window:
             self._times.popleft()
-            self._rates.popleft()
+            dropped = self._rates.popleft()
+            self._rate_sum -= dropped
+            self._rate_sum_sq -= dropped * dropped
 
         self._prev_count = count
         self._prev_time = now
         self._update_readout(elapsed, window, rate, count)
+        # 只标记「有新数据」，真正重绘交给 8 Hz 的节拍
+        self._dirty = True
 
         # 用设定的积分时间重新起表，抵消读数耗时
         try:
@@ -775,21 +798,35 @@ class PhotonPanel(QWidget):
 
     def _update_readout(self, elapsed: float, window: float,
                         rate: float, total: int) -> None:
+        """只更新文本和统计，不碰画布。
+
+        统计用增量维护的 sum / sum_sq：窗口里可能有 72000 个点，每 tick
+        遍历一次光统计就要几十毫秒。
+        """
+        self._rate_sum += rate
+        self._rate_sum_sq += rate * rate
+
         self.rate_label.setText(f"Rate: {rate:,.0f} cps")
         self.total_label.setText(f"Total counts: {total:,}")
-        if len(self._rates) >= 2:
-            try:
-                mean = statistics.mean(self._rates)
-                std = statistics.stdev(self._rates)
-            except statistics.StatisticsError:
-                mean = std = float("nan")
-            self.stats_label.setText(
-                f"Mean: {mean:,.0f}   Std: {std:,.0f}  (window)")
 
+        n = len(self._rates)
+        if n >= 2:
+            mean = self._rate_sum / n
+            variance = max(0.0, (self._rate_sum_sq - n * mean * mean)
+                           / (n - 1))
+            self.stats_label.setText(
+                f"Mean: {mean:,.0f}   Std: {variance ** 0.5:,.0f}  (window)")
+
+    def _draw_curve(self) -> None:
+        """真正画一次（由 _repaint_timer 或显式重绘调用）。"""
         if self.figure is None or self.canvas is None:
             return
         self._line.set_data(list(self._times), list(self._rates))
-        self._ax.set_xlim(max(0.0, elapsed - window), max(window, elapsed))
+        if self._times:
+            window = max(5.0, self.window_spin.value())
+            latest = self._times[-1]
+            self._ax.set_xlim(max(0.0, latest - window),
+                              max(window, latest))
         if self._rates:
             lo, hi = min(self._rates), max(self._rates)
             if lo == hi:
@@ -851,7 +888,12 @@ class PhotonPanel(QWidget):
         # 于是「停采后点了 Clear，过一会儿又冒出一个点」。
         self._generation += 1
         self._timer.stop()
+        self._repaint_timer.stop()
         self._running = False
+        # 停采后再补画一次，让最后几个点也上屏
+        if self._dirty:
+            self._dirty = False
+            self._draw_curve()
         dev = self._device
         if dev is not None:
             try:
@@ -913,6 +955,9 @@ class PhotonPanel(QWidget):
         self._times.clear()
         self._rates.clear()
         self._log = []
+        self._rate_sum = 0.0
+        self._rate_sum_sq = 0.0
+        self._dirty = False
         if self.figure is not None and self.canvas is not None:
             self._line.set_data([], [])
             self._repaint()               # 画**当前可见**的那个画布
@@ -964,6 +1009,7 @@ class PhotonPanel(QWidget):
     def interrupt(self) -> None:
         self._generation += 1
         self._timer.stop()
+        self._repaint_timer.stop()
         self._running = False
         if self._device is not None:
             try:

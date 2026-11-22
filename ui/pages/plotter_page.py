@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import csvdata as cd
+from ui.workers import run_async
 
 
 def _field(text: str, width: int = 10) -> QLineEdit:
@@ -462,6 +463,11 @@ class PlotterPage(QWidget):
             self.load_file()
 
     def load_file(self) -> None:
+        """读 CSV：解析放后台，控件更新回主线程。
+
+        几十万行的表解析要几十到几百毫秒，直接放在按钮槽里会卡住窗口
+        （文件对话框关掉后有一段明显的停顿）。
+        """
         path = self.path_edit.text().strip()
         if not path:
             return
@@ -469,15 +475,29 @@ class PlotterPage(QWidget):
             QMessageBox.warning(self, "Load error",
                                 f"File not found:\n{path}")
             return
-        try:
-            self.df = cd.read_table(path)
-        except ValueError as exc:
-            QMessageBox.critical(self, "Load error", str(exc))
-            return
 
-        self.columns = cd.column_names(self.df)
-        self.info_label.setText(cd.summary(self.df) + " loaded")
-        self._populate_columns()
+        self._load_request = getattr(self, "_load_request", 0) + 1
+        request = self._load_request
+        self.info_label.setText("Loading…")
+
+        def work():
+            return cd.read_table(path)
+
+        def done(df) -> None:
+            if request != self._load_request:
+                return                     # 又选了别的文件，丢弃这次
+            self.df = df
+            self.columns = cd.column_names(df)
+            self.info_label.setText(cd.summary(df) + " loaded")
+            self._populate_columns()
+
+        def failed(msg: str) -> None:
+            if request != self._load_request:
+                return
+            self.info_label.setText("Load failed")
+            QMessageBox.critical(self, "Load error", msg)
+
+        run_async(work, done, failed)
 
     def _populate_columns(self) -> None:
         cols = self.columns

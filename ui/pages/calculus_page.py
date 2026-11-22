@@ -182,6 +182,8 @@ class _BaseTab(QWidget):
         self.result = ResultPanel()
         outer.addWidget(self.result, 1)
 
+        #: 计算请求编号：连续点击时只接受最新一次的结果
+        self._request = 0
         self.run_btn.clicked.connect(self.compute)
         self.clear_btn.clicked.connect(self.clear)
 
@@ -191,6 +193,41 @@ class _BaseTab(QWidget):
 
     def clear(self) -> None:              # pragma: no cover
         self.result.show_result()
+
+    # ------------------------------------------------------------------
+    def _run_compute(self, work, apply) -> None:
+        """统一的「后台纯计算 -> 主线程渲染」包装。
+
+        ``work()`` 在后台线程跑，**不许碰任何 Qt 对象**；``apply(data)``
+        在 GUI 线程跑，负责画图和填面板。连续点 Compute 时只接受最新
+        一次的结果（请求编号）。
+
+        符号求导/积分在复杂表达式上要几百毫秒，放在按钮槽里会卡住整个
+        窗口，所以统一走这里。
+        """
+        self._request += 1
+        request = self._request
+
+        def done(data) -> None:
+            if request != self._request:
+                return                       # 有更新的请求，丢弃
+            self._end_compute()
+            if data is not None:
+                apply(data)
+
+        def failed(msg: str) -> None:
+            if request != self._request:
+                return
+            self._end_compute()
+            self.result.show_result(error=msg)
+
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText("Computing…")
+        run_async(work, done, failed)
+
+    def _end_compute(self) -> None:
+        self.run_btn.setEnabled(True)
+        self.run_btn.setText("Compute")
 
 
 def _expr_field(placeholder: str) -> QLineEdit:
@@ -257,6 +294,7 @@ class IntegralTab(_BaseTab):
         self.form.addRow("Bounds", _wrap(bounds))
 
     def compute(self) -> None:
+        """取快照 -> 后台积分 -> 主线程渲染。"""
         expr = self.expr.text().strip()
         if not expr:
             self.result.show_result(error="Please enter an integrand first")
@@ -264,62 +302,84 @@ class IntegralTab(_BaseTab):
         var = self.var.text().strip() or "x"
         lo_text = self.lower.text().strip()
         hi_text = self.upper.text().strip()
-
         assumptions = _assumptions_for(self.assume, [var])
 
         if not lo_text and not hi_text:
-            # ---- 不定积分 ----
-            try:
-                txt, latex, notes = cs.integrate_symbolic(
-                    expr, var, assumptions=assumptions)
-            except Exception as exc:
-                self.result.show_result(error=f"{type(exc).__name__}: {exc}")
-                return
-            self.result.show_result(
-                latex=latex, text=txt,
-                numeric="\n".join(notes) if notes else "indefinite integral")
+            def work():
+                try:
+                    txt, latex, notes = cs.integrate_symbolic(
+                        expr, var, assumptions=assumptions)
+                    return {
+                        "ok": True,
+                        "text": txt,
+                        "latex": latex,
+                        "numeric": "\n".join(notes) if notes else
+                                   "indefinite integral",
+                    }
+                except Exception as exc:             # noqa: BLE001
+                    return {"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}
+
+            def apply(data) -> None:
+                if not data["ok"]:
+                    self.result.show_result(error=data["error"])
+                    return
+                self.result.show_result(
+                    latex=data["latex"], text=data["text"],
+                    numeric=data["numeric"])
+
+            self._run_compute(work, apply)
             return
 
         if not lo_text or not hi_text:
-            self.result.show_result(error="A definite integral needs both bounds")
+            self.result.show_result(
+                error="A definite integral needs both bounds")
             return
 
-        # 数值和符号各算各的：一边失败不该丢掉另一边已经算好的结果。
-        lines: list[str] = []
-        warns: list[str] = []
-        notes: list[str] = []
-        numeric_value = None
-        symbolic_text = symbolic_latex = None
+        def work():
+            # 数值和符号各算各的：一边失败不该丢掉另一边已经算好的结果
+            lines: list[str] = []
+            warns: list[str] = []
+            notes: list[str] = []
+            numeric_value = None
+            symbolic_text = symbolic_latex = None
+            try:
+                lo = cn.parse_bound(lo_text)
+                hi = cn.parse_bound(hi_text)
+                numeric_value, err, warns = cn.integrate(
+                    expr, lo, hi, x_name=var)
+                lines.append(f"Numeric result: {numeric_value}")
+                lines.append(f"Error estimate: ±{err:.3e}")
+            except Exception as exc:                 # noqa: BLE001
+                lines.append(f"Numeric failed: {type(exc).__name__}: {exc}")
 
-        try:
-            lo = cn.parse_bound(lo_text)
-            hi = cn.parse_bound(hi_text)
-            numeric_value, err, warns = cn.integrate(expr, lo, hi, x_name=var)
-            lines.append(f"Numeric result: {numeric_value}")
-            lines.append(f"Error estimate: ±{err:.3e}")
-        except Exception as exc:
-            lines.append(f"Numeric failed: {type(exc).__name__}: {exc}")
+            try:
+                # 传原始文本：符号层自己解析，pi 这类值不会被截成浮点
+                symbolic_text, symbolic_latex, notes = cs.integrate_symbolic(
+                    expr, var, lower=lo_text, upper=hi_text,
+                    assumptions=assumptions)
+                lines.append(f"Symbolic result: {symbolic_text}")
+            except Exception as exc:                 # noqa: BLE001
+                lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
 
-        try:
-            # 传原始文本而不是 float：符号层自己解析，pi 这类值不会被截成 3
-            symbolic_text, symbolic_latex, notes = cs.integrate_symbolic(
-                expr, var, lower=lo_text, upper=hi_text,
-                assumptions=assumptions)
-            lines.append(f"Symbolic result: {symbolic_text}")
-        except Exception as exc:
-            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+            for w in (warns or []) + (notes or []):
+                lines.append(f"Note: {w}")
+            return {
+                "lines": lines,
+                "numeric_value": numeric_value,
+                "symbolic_text": symbolic_text,
+                "latex": symbolic_latex,
+            }
 
-        for w in (warns or []) + (notes or []):
-            lines.append(f"Note: {w}")
+        def apply(data) -> None:
+            if data["numeric_value"] is None and data["symbolic_text"] is None:
+                self.result.show_result(error="\n".join(data["lines"]))
+                return
+            self.result.show_result(
+                latex=data["latex"], text=data["symbolic_text"],
+                numeric="\n".join(data["lines"]))
 
-        if numeric_value is None and symbolic_text is None:
-            self.result.show_result(error="\n".join(lines))
-            return
-        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
-                                numeric="\n".join(lines))
-
-
-# ====================================================================== 导数
+        self._run_compute(work, apply)
 class DerivativeTab(_BaseTab):
     def __init__(self) -> None:
         super().__init__()
@@ -351,6 +411,7 @@ class DerivativeTab(_BaseTab):
         self.form.addRow("Evaluate at (optional)", _wrap(pt_row))
 
     def compute(self) -> None:
+        """取快照 -> 后台求导 -> 主线程渲染。"""
         expr = self.expr.text().strip()
         if not expr:
             self.result.show_result(error="Please enter a function first")
@@ -371,38 +432,43 @@ class DerivativeTab(_BaseTab):
                           "(leave it empty to get the expression only)")
                 return
 
-        lines: list[str] = []
-        symbolic_text = symbolic_latex = None
-        numeric_ok = False
+        def work():
+            lines: list[str] = []
+            symbolic_text = symbolic_latex = None
+            numeric_ok = False
 
-        # 数值结果（只有填了求值点才算）
-        if x0 is not None:
+            if x0 is not None:
+                try:
+                    value, err = cn.derivative(expr, x0, order=order,
+                                               x_name=var)
+                    lines.append(
+                        f"{'second' if order == 2 else 'first'} derivative at "
+                        f"{var} = {x0}: {value}")
+                    lines.append(f"Error estimate: ±{err:.3e}")
+                    numeric_ok = True
+                except Exception as exc:             # noqa: BLE001
+                    lines.append(
+                        f"Numeric failed: {type(exc).__name__}: {exc}")
+
             try:
-                value, err = cn.derivative(expr, x0, order=order, x_name=var)
-                lines.append(
-                    f"{'second' if order == 2 else 'first'} derivative at "
-                    f"{var} = {x0}: {value}")
-                lines.append(f"Error estimate: ±{err:.3e}")
-                numeric_ok = True
+                symbolic_text, symbolic_latex = cs.differentiate(
+                    expr, var, order=order, assumptions=assumptions)
+                lines.append(f"Derivative: {symbolic_text}")
             except Exception as exc:                 # noqa: BLE001
-                lines.append(f"Numeric failed: {type(exc).__name__}: {exc}")
+                lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
 
-        # 符号结果（总是尝试）
-        try:
-            symbolic_text, symbolic_latex = cs.differentiate(
-                expr, var, order=order, assumptions=assumptions)
-            lines.append(f"Derivative: {symbolic_text}")
-        except Exception as exc:                     # noqa: BLE001
-            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+            return {"lines": lines, "text": symbolic_text,
+                    "latex": symbolic_latex, "numeric_ok": numeric_ok}
 
-        if symbolic_text is None and not numeric_ok:
-            self.result.show_result(error="\n".join(lines))
-            return
-        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
-                                numeric="\n".join(lines))
+        def apply(data) -> None:
+            if data["text"] is None and not data["numeric_ok"]:
+                self.result.show_result(error="\n".join(data["lines"]))
+                return
+            self.result.show_result(
+                latex=data["latex"], text=data["text"],
+                numeric="\n".join(data["lines"]))
 
-
-# ====================================================================== 偏导
+        self._run_compute(work, apply)
 class PartialTab(_BaseTab):
     def __init__(self) -> None:
         super().__init__()
@@ -439,17 +505,22 @@ class PartialTab(_BaseTab):
         self.form.addRow("Evaluate at (optional)", _wrap(p_row))
 
     def compute(self) -> None:
+        """取快照 -> 后台求偏导 -> 主线程渲染。"""
         expr = self.expr.text().strip()
         if not expr:
             self.result.show_result(error="Please enter a function first")
             return
-        variables = [v.strip() for v in self.vars.text().split(",") if v.strip()]
+        variables = [v.strip() for v in self.vars.text().split(",")
+                     if v.strip()]
         if not variables:
-            self.result.show_result(error="At least one variable is required")
+            self.result.show_result(
+                error="At least one variable is required")
             return
         var = self.which.text().strip() or variables[0]
         if var not in variables:
-            self.result.show_result(error=f"Differentiation variable {var} is not in the variable list")
+            self.result.show_result(
+                error=f"Differentiation variable {var} is not in the "
+                      "variable list")
             return
 
         # 求值点是可选的：留空就只给符号表达式
@@ -462,56 +533,63 @@ class PartialTab(_BaseTab):
                     continue
                 if "=" not in piece:
                     self.result.show_result(
-                        error=f"Evaluation point \"{piece}\" should be written "
-                              f"as name=value (or leave the field empty)")
+                        error=f"Evaluation point \"{piece}\" should be "
+                              "written as name=value (or leave the field "
+                              "empty)")
                     return
                 name, _, value = piece.partition("=")
                 try:
                     point[name.strip()] = float(value.strip())
                 except ValueError:
-                    self.result.show_result(error=f"\"{value.strip()}\" is not a number")
+                    self.result.show_result(
+                        error=f"\"{value.strip()}\" is not a number")
                     return
 
         order = self.order.value()
         assume = _assumptions_for(self.assume, variables)
 
-        lines: list[str] = []
-        symbolic_text = symbolic_latex = None
-        numeric_ok = False
+        def work():
+            lines: list[str] = []
+            symbolic_text = symbolic_latex = None
+            numeric_ok = False
 
-        # 数值结果：只有在给出**完整**求值点时才计算
-        if point:
-            missing = [v for v in variables if v not in point]
-            if missing:
-                lines.append("Numeric skipped — no value given for "
-                             + ", ".join(missing))
-            else:
-                try:
-                    value, err = cn.partial_derivative(
-                        expr, variables, point, var, order=order)
-                    lines.append(f"∂/∂{var} at {point}: {value}")
-                    lines.append(f"Error estimate: ±{err:.3e}")
-                    numeric_ok = True
-                except Exception as exc:             # noqa: BLE001
-                    lines.append(
-                        f"Numeric failed: {type(exc).__name__}: {exc}")
+            # 数值结果：只有在给出**完整**求值点时才计算
+            if point:
+                missing = [v for v in variables if v not in point]
+                if missing:
+                    lines.append("Numeric skipped — no value given for "
+                                 + ", ".join(missing))
+                else:
+                    try:
+                        value, err = cn.partial_derivative(
+                            expr, variables, point, var, order=order)
+                        lines.append(f"∂/∂{var} at {point}: {value}")
+                        lines.append(f"Error estimate: ±{err:.3e}")
+                        numeric_ok = True
+                    except Exception as exc:         # noqa: BLE001
+                        lines.append(
+                            f"Numeric failed: {type(exc).__name__}: {exc}")
 
-        # 符号结果：总是尝试
-        try:
-            symbolic_text, symbolic_latex = cs.partial(
-                expr, variables, var, order=order, assumptions=assume)
-            lines.append(f"Partial derivative: {symbolic_text}")
-        except Exception as exc:                     # noqa: BLE001
-            lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
+            # 符号结果：总是尝试
+            try:
+                symbolic_text, symbolic_latex = cs.partial(
+                    expr, variables, var, order=order, assumptions=assume)
+                lines.append(f"Partial derivative: {symbolic_text}")
+            except Exception as exc:                 # noqa: BLE001
+                lines.append(f"Symbolic failed: {type(exc).__name__}: {exc}")
 
-        if symbolic_text is None and not numeric_ok:
-            self.result.show_result(error="\n".join(lines))
-            return
-        self.result.show_result(latex=symbolic_latex, text=symbolic_text,
-                                numeric="\n".join(lines))
+            return {"lines": lines, "text": symbolic_text,
+                    "latex": symbolic_latex, "numeric_ok": numeric_ok}
 
+        def apply(data) -> None:
+            if data["text"] is None and not data["numeric_ok"]:
+                self.result.show_result(error="\n".join(data["lines"]))
+                return
+            self.result.show_result(
+                latex=data["latex"], text=data["text"],
+                numeric="\n".join(data["lines"]))
 
-# ====================================================================== 泰勒展开
+        self._run_compute(work, apply)
 class TaylorTab(_BaseTab):
     """在一点附近把函数展开成多项式。"""
 
