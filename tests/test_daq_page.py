@@ -852,6 +852,86 @@ class DaqPageTest(unittest.TestCase):
                          "旧 Stop 的 work 把新任务停了")
         self.assertTrue(panel._running)
 
+    # ---- 弹出窗口的生命周期 ----
+    def _start_counting(self):
+        page = self.page
+        self.connect()
+        ph = page.photon
+        ph.bin_spin.setValue(0.05)
+        ph.start()
+        self.pump(12.0, lambda: len(ph._log) >= 4)
+        ph.stop()
+        self.pump(5.0, lambda: not ph._running)
+        return ph
+
+    def test_escape_closes_popout_and_restores(self):
+        """Esc 走 QDialog.done()，不经 closeEvent —— 也要恢复主画布。"""
+        ph = self._start_counting()
+        # offscreen 平台下子控件的 isVisible() 恒为 False，
+        # 所以这里查的是**显式隐藏状态** isHidden()
+        ph.toggle_popout()
+        self.app.processEvents()
+        self.assertFalse(ph._popout.isHidden(), "弹窗应当显示")
+        self.assertTrue(ph.canvas.isHidden(), "主画布应当收起")
+
+        ph._popout.reject()          # 等价按 Esc
+        self.app.processEvents()
+
+        self.assertTrue(ph._popout.isHidden(), "Esc 后弹窗应当隐藏")
+        self.assertFalse(ph.canvas.isHidden(), "Esc 后主画布没恢复")
+        self.assertEqual(ph.popout_btn.text(), "Pop out plot")
+
+        # 再弹一次，第二次 Esc 也得恢复（标志要复位）
+        ph.toggle_popout()
+        self.app.processEvents()
+        self.assertFalse(ph._popout.isHidden())
+        ph._popout.reject()
+        self.app.processEvents()
+        self.assertFalse(ph.canvas.isHidden(), "第二次 Esc 没恢复")
+
+    def test_clear_repaints_visible_canvas(self):
+        """停采后在弹出窗口里 Clear，可见画布必须收到重绘。"""
+        ph = self._start_counting()
+        ph.toggle_popout()
+        self.app.processEvents()
+
+        canvas = ph._popout.canvas
+        draws = []
+        original = canvas.draw
+
+        def counting_draw(*a, **k):
+            draws.append(1)
+            return original(*a, **k)
+
+        canvas.draw = counting_draw
+        canvas.draw_idle = lambda: (draws.append(1), original())
+
+        ph.clear_plot()
+        self.app.processEvents()
+
+        self.assertEqual(len(ph._times), 0, "数据没清空")
+        self.assertGreaterEqual(len(draws), 1, "可见画布没收到重绘")
+        ph._popout.reject()
+        self.app.processEvents()
+
+    def test_popout_window_is_reused(self):
+        """反复弹出/收回不能一路新建隐藏窗口（每个都占 RGBA 缓冲）。"""
+        ph = self._start_counting()
+        ph.toggle_popout()
+        self.app.processEvents()
+        first = ph._popout
+        ph._popout.reject()
+        self.app.processEvents()
+
+        for _ in range(5):
+            ph.toggle_popout()
+            self.app.processEvents()
+            ph._popout.reject()
+            self.app.processEvents()
+
+        self.assertIs(ph._popout, first, "每次都新建了窗口")
+        self.assertTrue(ph._popout.isHidden())
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

@@ -300,6 +300,31 @@ class TestCsvSniff(unittest.TestCase):
             self.assertEqual(got.shape, want.shape, sep)
             self.assertEqual(list(got.iloc[:, 0]), list(want.iloc[:, 0]), sep)
 
+    def test_sample_truncated_mid_record(self):
+        """样本在记录中间被截断时，不能用那条半行去否定正确结果。
+
+        1000 行、每行 ~17 字节时，8192 字节样本正好停在 "a,b,c" ——
+        那一行只有 1 列。旧实现拿它一起校验列宽，把 Sniffer 判对的
+        分号否掉，回退到频次又选了逗号。
+        """
+        from core import csvdata
+        header = 'name,unit,id;"time";signal\n'
+        row = 'a,b,c;"0";1\n'
+        p = self._write("a.csv", header + row * 1000)
+
+        sample = open(p, encoding="utf-8").read(csvdata.SNIFF_BYTES)
+        self.assertFalse(sample.endswith("\n"), "样本应当被截断")
+
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(list(df.columns),
+                         ["name,unit,id", "time", "signal"])
+        self.assertEqual(df.shape, (1000, 3))
+        self.assertEqual(list(df.iloc[0]), ["a,b,c", 0, 1])
+        numeric = csvdata.numeric_columns(df)
+        self.assertIn("time", numeric)
+        self.assertIn("signal", numeric)
+
     def test_sniff_picks_the_right_separator(self):
         from core import csvdata
         p = self._write("a.csv", "a;b;c\n1;2;3\n")

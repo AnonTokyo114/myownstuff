@@ -410,6 +410,8 @@ class PlotWindow(QDialog):
         self.setWindowTitle("Live photon count rate")
         self.resize(1100, 680)
         self.setSizeGripEnabled(True)
+        #: closed 只发一次（Esc 和关闭按钮可能都会走到）
+        self._notified = False
 
         self.canvas = FigureCanvas(figure)
         layout = QVBoxLayout(self)
@@ -424,8 +426,23 @@ class PlotWindow(QDialog):
         except Exception:                        # noqa: BLE001
             pass
 
+    def _notify_closed(self) -> None:
+        """通知一次「我关了」，重复调用无效。
+
+        QDialog 按 Esc 走 reject() -> done()，**不经过 closeEvent**；
+        所以这里同时覆盖两条路径，否则 Esc 关闭后主面板的 canvas 永远
+        不会恢复。
+        """
+        if not self._notified:
+            self._notified = True
+            self.closed.emit()
+
+    def done(self, result: int) -> None:
+        self._notify_closed()
+        super().done(result)
+
     def closeEvent(self, event) -> None:         # noqa: N802
-        self.closed.emit()
+        self._notify_closed()
         super().closeEvent(event)
 
 
@@ -798,12 +815,20 @@ class PhotonPanel(QWidget):
         """把实时曲线在主面板和独立窗口之间来回搬。"""
         if self.figure is None or self.canvas is None:
             return
-        if self._popout is not None:
-            self._popout.close()
+        # 窗口只建一次，之后反复显隐 —— 每次新建会让隐藏窗口（连同
+        # 它的 RGBA 缓冲）留在父对象下面，反复开关就一路涨内存。
+        if self._popout is None:
+            # parent=None：不挂在面板下面，避免被父对象持有
+            self._popout = PlotWindow(self.figure)
+            self._popout.closed.connect(self._on_popout_closed)
+
+        if self._popout.isVisible():
+            self._popout.close()          # 走统一恢复路径
             return
 
-        self._popout = PlotWindow(self.figure, self)
-        self._popout.closed.connect(self._on_popout_closed)
+        # 复用同一个窗口：重置「已通知」标志，否则第二次 Esc 就不再发
+        # closed 信号，主面板的 canvas 会一直藏着
+        self._popout._notified = False
         # 主面板的 canvas 收起来；数据仍在采，figure 仍然在更新
         self.canvas.setVisible(False)
         self._popout.show()
@@ -812,13 +837,19 @@ class PhotonPanel(QWidget):
         self._repaint()
 
     def _on_popout_closed(self) -> None:
-        self._popout = None
+        """弹出窗口关闭 / Esc：恢复主面板（可重复调用）。"""
         if self.canvas is not None:
             self.canvas.setVisible(True)
             self.canvas.draw_idle()
         self.popout_btn.setText("Pop out plot")
+        if self._popout is not None:
+            self._popout.hide()           # 保留对象，下次复用
 
     def stop(self) -> None:
+        # 递增编号：在途的 start 回调到这里就作废了。不加这一步的话，
+        # 一个还没返回的 start 会在 stop 之后执行 done，把定时器又启起来，
+        # 于是「停采后点了 Clear，过一会儿又冒出一个点」。
+        self._generation += 1
         self._timer.stop()
         self._running = False
         dev = self._device
@@ -843,7 +874,7 @@ class PhotonPanel(QWidget):
         self._t0 = 0.0
         if self.figure is not None and self.canvas is not None:
             self._line.set_data([], [])
-            self.canvas.draw_idle()
+            self._repaint()
 
     def clear_plot(self) -> None:
         """清掉已采的数据。
@@ -884,7 +915,7 @@ class PhotonPanel(QWidget):
         self._log = []
         if self.figure is not None and self.canvas is not None:
             self._line.set_data([], [])
-            self.canvas.draw_idle()
+            self._repaint()               # 画**当前可见**的那个画布
         self.rate_label.setText("Rate: —")
         self.stats_label.setText("Mean: —   Std: —")
         self.total_label.setText("Total counts: —")
@@ -931,6 +962,7 @@ class PhotonPanel(QWidget):
         self.source_edit.setEnabled(connected and not running)
 
     def interrupt(self) -> None:
+        self._generation += 1
         self._timer.stop()
         self._running = False
         if self._device is not None:

@@ -66,7 +66,17 @@ def _count_unquoted(line: str, sep: str) -> int:
 
 
 def _consistent_widths(sample: str, sep: str) -> bool:
-    """按 sep 用 csv.reader 解析，列数是否一致且大于 1。"""
+    """按 sep 用 csv.reader 解析，**完整记录**的列数是否一致且大于 1。
+
+    样本是从文件开头截的一段，最后一行很可能正好被切断（比如停在
+    ``a,b,c``），那一行只有 1 列，拿来校验会把正确答案否掉。所以先
+    砍掉最后一个换行之后的内容。
+    """
+    cut = sample.rfind("\n")
+    if cut <= 0:
+        return False                      # 连一行完整的都没有
+    sample = sample[:cut]
+
     try:
         rows = list(csv.reader(sample.splitlines(), delimiter=sep))
     except csv.Error:
@@ -103,12 +113,17 @@ def _sniff_sep(path: str) -> str | None:
     # 1) 标准库方言嗅探
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters="".join(CANDIDATE_SEPS))
-        if _consistent_widths(sample, dialect.delimiter):
-            return dialect.delimiter
+        sep = dialect.delimiter
+        if _consistent_widths(sample, sep):
+            return sep
+        # Sniffer 给了答案，但列宽对不上 —— 多半是样本被截断，
+        # 也可能是它真的判错了。两种情况下都**不要**拿字符频次去覆盖
+        # 一个更懂引号的判断：直接交给调用方的自动识别（sep=None）。
+        return None
     except csv.Error:
         pass
 
-    # 2) 退回引号外计数（Sniffer 对短样本可能放弃）
+    # 2) Sniffer 完全放弃时，才退回引号外计数
     lines = [ln for ln in sample.splitlines() if ln.strip()][:5]
     if not lines:
         return None
