@@ -40,11 +40,35 @@ SNIFF_BYTES = 8192
 CANDIDATE_SEPS = (",", ";", "\t", "|")
 
 
+def _count_unquoted(line: str, sep: str) -> int:
+    """数一行里**引号外**的 sep 个数。
+
+    直接 ``line.count(sep)`` 会数到引号里面的字符：
+    ``"time,stamp";value`` 用逗号去数也会得到 1，于是把分号文件误判成
+    逗号文件、读成 1 列而**不报错**（C 引擎照样"成功"）。所以这里按
+    引号状态跳过字段内容，并把 ``""`` 当作转义引号。
+    """
+    count = 0
+    in_quotes = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
+                i += 2                    # 转义的双引号，留在字段里
+                continue
+            in_quotes = not in_quotes
+        elif ch == sep and not in_quotes:
+            count += 1
+        i += 1
+    return count
+
+
 def _sniff_sep(path: str) -> str | None:
     """从文件开头猜分隔符；猜不出来返回 None。
 
-    只要求「前几行里每行的该字符个数一致且非零」—— 这足以区分逗号、
-    制表符、分号，又不至于被引号里的逗号骗到（那种情况会落到回退路径）。
+    要求「前几行里每行**引号外**的该字符个数一致且非零」。跨行的
+    引号字段会破坏这个前提，那种情况交给回退路径。
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -57,10 +81,14 @@ def _sniff_sep(path: str) -> str | None:
     if not lines:
         return None
 
+    # 引号没闭合（跨行字段）就别猜了
+    if sample.count('"') % 2:
+        return None
+
     best: str | None = None
     best_score = 0
     for sep in CANDIDATE_SEPS:
-        counts = [ln.count(sep) for ln in lines]
+        counts = [_count_unquoted(ln, sep) for ln in lines]
         if counts[0] == 0 or len(set(counts)) != 1:
             continue                      # 没出现 / 每行个数不一致
         score = counts[0] * 10 + len(lines)

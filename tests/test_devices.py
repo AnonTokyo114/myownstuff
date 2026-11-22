@@ -209,6 +209,45 @@ class TestCsvSniff(unittest.TestCase):
         df = csvdata.read_table(str(p))
         self.assertEqual(df.shape, (1, 2))
 
+    def test_quoted_semicolon_file_not_mistaken_for_comma(self):
+        """每行引号里都有逗号、真正分隔符是分号 —— 不能嗅探成逗号。
+
+        直接 str.count(",") 会数到引号内的逗号，把 2 列读成 1 列，而且
+        C 引擎照样"成功"，不会触发回退。
+        """
+        from core import csvdata
+        p = self._write(
+            "a.csv",
+            '"time,stamp";value\n"1,2";3\n"4,5";6\n')
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(list(df.columns), ["time,stamp", "value"])
+        self.assertEqual(df.shape, (2, 2))
+
+    def test_quoted_comma_file_not_mistaken_for_semicolon(self):
+        """反向：每行引号里都有分号、真正分隔符是逗号。"""
+        from core import csvdata
+        p = self._write(
+            "a.csv",
+            '"time;stamp;part",value\n"1;2;3",4\n"5;6;7",8\n')
+        self.assertEqual(csvdata._sniff_sep(str(p)), ",")
+        df = csvdata.read_table(str(p))
+        self.assertEqual(list(df.columns), ["time;stamp;part", "value"])
+        self.assertEqual(df.shape, (2, 2))
+
+    def test_escaped_quotes_inside_field(self):
+        """字段里的 "" 是转义引号，不能打乱引号状态。"""
+        from core import csvdata
+        p = self._write("a.csv", 'a;b\n"x""y;z";1\n')
+        self.assertEqual(csvdata._sniff_sep(str(p)), ";")
+        self.assertEqual(csvdata.read_table(str(p)).shape, (1, 2))
+
+    def test_unbalanced_quotes_falls_back(self):
+        """引号没闭合（跨行字段）时不要猜，交给回退路径。"""
+        from core import csvdata
+        p = self._write("a.csv", 'a,b\n"x,1\n2,3\n')
+        self.assertIsNone(csvdata._sniff_sep(str(p)))
+
     def test_sniff_picks_the_right_separator(self):
         from core import csvdata
         p = self._write("a.csv", "a;b;c\n1;2;3\n")

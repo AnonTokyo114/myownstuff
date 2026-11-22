@@ -775,6 +775,83 @@ class DaqPageTest(unittest.TestCase):
         self.assertIn("Pulsing", panel.status_label.text())
         panel.interrupt()
 
+    def test_pending_stop_does_not_stop_newer_task(self):
+        """Stop 的 work（不是回调）也不能停掉更新的任务。
+
+        只过滤完成回调是不够的：硬件已经被停了，界面再一致也只是表面。
+        """
+        from ui.widgets.daq_panels import PulsePanel
+
+        class Fake:
+            def __init__(self):
+                self.last_params = None
+                self.counter = "Dev1/ctr0"
+                self._start_token = 0
+                self.last_token = 0
+
+            def check_params(self, f, d):
+                return float(f), float(d)
+
+            def start(self, f, d, counter=None):
+                self._start_token += 1
+                self.last_token = self._start_token
+                self.last_params = (f, d)
+                return f, d, self._start_token
+
+            def stop_if_still(self, token):
+                if token != self._start_token:
+                    return None
+                self.last_params = None
+                return None
+
+            def stop(self):
+                self.last_params = None
+                return None
+
+            def status_text(self):
+                return "fake"
+
+        panel = PulsePanel()
+        fake = Fake()
+        panel.set_device(fake)
+        pending = []
+
+        def fake_run_async(work, done, failed):
+            pending.append((work, done, failed))
+
+        # a. 启动
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.freq_spin.setValue(1000.0)
+            panel.start()
+        w, d, _f = pending[0]
+        d(w())
+        self.app.processEvents()
+
+        # b. Stop 提交但 work 暂缓
+        pending.clear()
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.stop()
+        stop_work, stop_done, _f = pending[0]
+
+        # c. 新 Apply 3000 先跑完
+        pending.clear()
+        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+            panel.freq_spin.setValue(3000.0)
+            panel.start()
+        nw, nd, _f = pending[0]
+        nd(nw())
+        self.app.processEvents()
+        self.assertEqual(fake.last_params, (3000.0, 25.0))
+
+        # d. 旧 Stop 的 work 现在才执行
+        stop_work()
+        stop_done(None)
+        self.app.processEvents()
+
+        self.assertEqual(fake.last_params, (3000.0, 25.0),
+                         "旧 Stop 的 work 把新任务停了")
+        self.assertTrue(panel._running)
+
     def test_dual_outputs_apply(self):
         page = self.page
         self.connect()

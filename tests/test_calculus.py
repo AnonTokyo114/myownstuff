@@ -135,6 +135,32 @@ class TestLatexCache(unittest.TestCase):
         self.assertLessEqual(len(self.lr._CACHE), self.lr.CACHE_SIZE)
 
 
+class TestClearInvalidatesRequest(unittest.TestCase):
+    """Clear 必须让在途的后台计算作废，否则结果会自己长回来。
+
+    这条要 Qt；没有 PySide6 时跳过。
+    """
+
+    def test_clear_bumps_request(self):
+        try:
+            import os
+            os.environ.setdefault("QT_API", "pyside6")
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+        except Exception:                        # noqa: BLE001
+            self.skipTest("PySide6 not available")
+        app = QApplication.instance() or QApplication([])
+        from ui.pages.calculus_page import TaylorTab
+
+        tab = TaylorTab()
+        before = tab._request
+        tab.clear()
+        self.assertEqual(tab._request, before + 1,
+                         "Clear 没有递增请求编号")
+        self.assertTrue(tab.run_btn.isEnabled(), "Clear 后按钮应该恢复可用")
+        app.processEvents()
+
+
 class TestTaylor(unittest.TestCase):
     """泰勒展开。"""
 

@@ -1033,8 +1033,16 @@ class PulsePanel(QWidget):
         self._generation += 1
         generation = self._generation
         bound = dev
+        # 捕获**提交时**正在输出的那个任务。work 真正执行时可能已经有
+        # 更新的 Apply 顶替了它，那时不能停 —— 只过滤完成回调是不够的，
+        # 硬件已经被停了，界面再对也只是表面一致。
+        token = getattr(dev, "last_token", None)
 
         def work():
+            if generation != self._generation or bound is not self._device:
+                return None
+            if token is not None and hasattr(dev, "stop_if_still"):
+                return dev.stop_if_still(token)
             return dev.stop()
 
         def done(error) -> None:
