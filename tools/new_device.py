@@ -323,6 +323,10 @@ class @CLASS@Page(QWidget):
         outer.addWidget(self.log_view)
 
         self.clear_log_btn.clicked.connect(self.log_view.clear)
+        # 驱动通过 log_callback 发出来的消息（握手、协议响应、诊断）
+        # 也要落到这个日志框 —— _device_options 里把它们转成了 log_line，
+        # 这里再把 log_line 接到写控件的那一端。
+        self.log_line.connect(self._append_log)
 
     # ------------------------------------------------------------------
     def _device_options(self) -> dict:
