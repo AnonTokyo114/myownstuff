@@ -3,6 +3,50 @@
 以加一台「功率计 Power Meter」为例，走完一遍需要碰 **5 个文件**。
 其中两个是纯登记（各一行），真正要写的是驱动和界面。
 
+---
+
+## 快速开始：先用脚手架生成骨架
+
+```bash
+python tools/new_device.py powermeter \
+    --name "Thorlabs PM100" \
+    --class-name PowerMeter \
+    --transports serial,lan \
+    --method power
+```
+
+它会生成三个**能直接 import、能构造**的文件：
+
+```
+core/powermeter.py            驱动骨架（含 Placeholder 变体）
+ui/pages/powermeter_page.py   页面骨架（DeviceSelector + 一个按钮）
+devicegui/powermeter_app.py   独立入口
+```
+
+每个文件都带 `TODO:` 标记，把命令填进去即可。
+
+然后脚本会打印**还需要手工登记的两处**（`core/devices.py` 和
+`devicegui/base.py`）—— 这两处是静态表，脚本故意不自动改，
+避免词表结构变化时写坏。
+
+常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--name` | 下拉/卡片上显示的名字 |
+| `--class-name` | 类名。`powermeter` 这种连写词建议显式给 `PowerMeter` |
+| `--transports` | `serial,lan,gpib,local`，默认 `serial` |
+| `--method` | 生成 `read_<method>()`，默认 `value` |
+| `--dry-run` | 只打印不写文件 |
+| `--force` | 覆盖已存在的文件 |
+
+生成的代码**自检通过**：脚本写完会立刻 `compile()` 一次，
+语法错误当场报出来，不会留给用户。
+
+下面的章节是**每一步在做什么、为什么这么写**，脚手架跳过不看也能读。
+
+---
+
 ```
 core/powermeter.py            ← 1. 驱动：怎么和仪器说话
 core/devices.py               ← 2. 登记型号（下拉里出现哪个名字）

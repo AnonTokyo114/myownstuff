@@ -506,6 +506,17 @@ Thorlabs FW102C 电动滤光片轮（串口）。它不单独占一张卡片 —
 
 完整步骤（含可复制的模板）见 **[docs/ADDING_A_DEVICE.md](docs/ADDING_A_DEVICE.md)**。
 
+**先跑脚手架**，三个文件一次性生成好：
+
+```bash
+python tools/new_device.py powermeter --name "Thorlabs PM100" \
+    --class-name PowerMeter --transports serial,lan --method power
+```
+
+它会生成 `core/powermeter.py`、`ui/pages/powermeter_page.py`、
+`devicegui/powermeter_app.py`，并打印**还需手工登记的两处**。
+`--dry-run` 可以先看会生成什么。
+
 概括下来要碰 5 个文件：
 
 ```
