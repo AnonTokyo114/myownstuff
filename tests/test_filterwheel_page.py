@@ -210,11 +210,11 @@ class TestRefreshStateSession(_Base):
 
     def test_old_result_after_reconnect_is_dropped(self):
         """读取中断开重连：旧结果不能落到新连接上。"""
-        old = _SnapshotDevice(state={"position": 1, "count": 6, "speed": 0})
+        # 旧设备的 position 必须和 STATE_6 里的初值不同，否则「没写入」
+        # 和「写了同样的值」分不开
+        old = _SnapshotDevice(state={"position": 4, "count": 6, "speed": 0})
         page = self.make_page(old)
         pending = []
-
-        real = __import__("ui.workers", fromlist=["run_async"]).run_async
 
         def capture(work, done, failed):
             pending.append((work, done, failed))
@@ -231,10 +231,12 @@ class TestRefreshStateSession(_Base):
         page._session += 1
         page._busy = False
 
+        before = dict(page._state)
         done(value)
         self.app.processEvents()
-        self.assertNotEqual(page._state.get("position"), 1,
-                            "旧结果覆盖了新连接")
+        # 整个 _state 都不能变 —— 只比某个字段会漏掉部分写入
+        self.assertEqual(page._state, before, "旧结果写进了新连接的状态")
+        self.assertNotEqual(page._state.get("position"), 4)
 
         # 新会话读取正常
         pending.clear()
