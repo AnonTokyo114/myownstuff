@@ -188,9 +188,9 @@ class TestNothingWrittenOnFailure(unittest.TestCase):
             self.assertIn("run_async(work, done, failed)", page)
             # 连接失败要看得见（pythonw 下没有控制台）
             self.assertIn("selector.failed.connect", page)
-            self.assertIn("QPlainTextEdit", page)
-            # 日志写进控件，不是 print 到控制台
-            self.assertIn("self.log_view.appendPlainText", page)
+            # 日志控件来自 LogPane（时间戳/上限/Clear 都在那里统一）
+            self.assertIn("LogPane(height=110)", page)
+            self.assertIn("self.log.append(text)", page)
             # 驱动通过 log_callback 发的消息也要落到这个控件里；
             # 少了这一条，Log 里只有 selector 的进度，没有协议诊断
             self.assertIn("self.log_line.connect(self._append_log)", page)

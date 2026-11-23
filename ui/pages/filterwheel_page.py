@@ -20,13 +20,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ui.widgets import DeviceSelector
+from ui.widgets import DeviceSelector, LogPane
 from ui.workers import run_async
 
 #: 设置项的选项表：(显示文字, 送给设备的值)
@@ -185,24 +184,12 @@ class FilterWheelPage(QWidget):
         # ------------------------------------------------ 右：日志
         right = QVBoxLayout()
         right.setSpacing(6)
-        log_head = QHBoxLayout()
-        lab = QLabel("Log")
-        lab.setObjectName("fieldLabel")
-        log_head.addWidget(lab)
-        log_head.addStretch(1)
-        self.clear_log_btn = QPushButton("Clear")
-        self.clear_log_btn.setObjectName("ghost")
-        self.clear_log_btn.setFixedWidth(70)
-        log_head.addWidget(self.clear_log_btn)
-        right.addLayout(log_head)
+        self.log = LogPane()                 # 跟随布局伸展
+        right.addWidget(self.log, 1)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("numericBox")
-        # 只保留最近几千行：长采集时日志会无限增长，
-        # 完整日志应该落盘，界面上留个窗口就够
-        self.log_view.setMaximumBlockCount(3000)
-        right.addWidget(self.log_view, 1)
+        # 兼容旧引用
+        self.log_view = self.log.view
+        self.clear_log_btn = self.log.clear_btn
 
         body.addLayout(right, 1)
         outer.addLayout(body, 1)
@@ -220,7 +207,6 @@ class FilterWheelPage(QWidget):
         self.move_btn.clicked.connect(self.move_to)
         self.apply_btn.clicked.connect(self.apply_settings)
         self.save_btn.clicked.connect(self.save_defaults)
-        self.clear_log_btn.clicked.connect(self.log_view.clear)
 
         self._update_controls()
 
@@ -233,8 +219,7 @@ class FilterWheelPage(QWidget):
         return {"log_callback": self.log_line.emit}
 
     def _append_log(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        self.log.append(text)
 
     # ------------------------------------------------------------------ 连接
     def _on_connected(self, device) -> None:

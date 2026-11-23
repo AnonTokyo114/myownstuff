@@ -233,13 +233,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ui.widgets import DeviceSelector
+from ui.widgets import DeviceSelector, LogPane
 from ui.workers import run_async
 
 
@@ -303,26 +302,9 @@ class @CLASS@Page(QWidget):
 
         outer.addWidget(box)
 
-        log_head = QHBoxLayout()
-        log_head.setSpacing(6)
-        log_lab = QLabel("Log")
-        log_lab.setObjectName("fieldLabel")
-        log_head.addWidget(log_lab)
-        log_head.addStretch(1)
-        self.clear_log_btn = QPushButton("Clear")
-        self.clear_log_btn.setObjectName("ghost")
-        self.clear_log_btn.setFixedWidth(70)
-        log_head.addWidget(self.clear_log_btn)
-        outer.addLayout(log_head)
+        self.log = LogPane(height=110)
+        outer.addWidget(self.log)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("numericBox")
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFixedHeight(110)
-        outer.addWidget(self.log_view)
-
-        self.clear_log_btn.clicked.connect(self.log_view.clear)
         # 驱动通过 log_callback 发出来的消息（握手、协议响应、诊断）
         # 也要落到这个日志框 —— _device_options 里把它们转成了 log_line，
         # 这里再把 log_line 接到写控件的那一端。
@@ -333,8 +315,7 @@ class @CLASS@Page(QWidget):
         return {"log_callback": self.log_line.emit}
 
     def _append_log(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        self.log.append(text)
 
     def _on_connect_failed(self, msg: str) -> None:
         self.status_label.setText(f"Connect failed: {msg}")

@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QTabWidget,
@@ -35,6 +34,7 @@ from core.nidaq import (
     PulseGenerator,
 )
 from core.transport import LocalTransport
+from ui.widgets.log_pane import LogPane
 from ui.widgets.daq_panels import AnalogChannelPanel, PhotonPanel, PulsePanel
 from ui.widgets.device_selector import DeviceSelector
 
@@ -113,32 +113,18 @@ class DaqPage(QWidget):
         outer.addWidget(self.tab_scroll, 1)
 
         # ---- 日志（可折叠：给图腾出高度）----
-        log_head = QHBoxLayout()
-        log_head.setSpacing(6)
-        lab = QLabel("Log")
-        lab.setObjectName("fieldLabel")
-        log_head.addWidget(lab)
-        log_head.addStretch(1)
+        self.log = LogPane(height=110)       # DAQ 给固定高度
         self.log_toggle_btn = QPushButton("Hide log")
         self.log_toggle_btn.setObjectName("ghost")
         self.log_toggle_btn.setFixedWidth(90)
         self.log_toggle_btn.setToolTip(
             "Hide the log to give the live plot more vertical space")
-        log_head.addWidget(self.log_toggle_btn)
-        self.clear_log_btn = QPushButton("Clear")
-        self.clear_log_btn.setObjectName("ghost")
-        self.clear_log_btn.setFixedWidth(70)
-        log_head.addWidget(self.clear_log_btn)
-        outer.addLayout(log_head)
+        self.log.add_header_button(self.log_toggle_btn)
+        outer.addWidget(self.log)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("numericBox")
-        # 只保留最近几千行：长采集时日志会无限增长，
-        # 完整日志应该落盘，界面上留个窗口就够
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFixedHeight(110)
-        outer.addWidget(self.log_view)
+        # 兼容旧引用（_toggle_log 等还在用这个名字）
+        self.log_view = self.log.view
+        self.clear_log_btn = self.log.clear_btn
 
         # ---- 信号 ----
         self.log_line.connect(self._append_log)
@@ -147,7 +133,6 @@ class DaqPage(QWidget):
         self.selector.disconnected.connect(self._on_disconnected)
         self.selector.failed.connect(
             lambda msg: QApplicationCritical(self, msg))
-        self.clear_log_btn.clicked.connect(self.log_view.clear)
         self.log_toggle_btn.clicked.connect(self._toggle_log)
 
         # 设备下拉一换（比如 Dev1 -> Dev9），自动填的通道名要跟着变
@@ -182,13 +167,12 @@ class DaqPage(QWidget):
 
         窗口不大的时候，日志那 110px 往往正是图缺的高度。
         """
-        visible = self.log_view.isVisible()
-        self.log_view.setVisible(not visible)
+        visible = self.log.body_visible()
+        self.log.set_body_visible(not visible)
         self.log_toggle_btn.setText("Show log" if visible else "Hide log")
 
     def _append_log(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        self.log.append(text)
 
     def _default_entries(self, resource: str) -> list:
         return [

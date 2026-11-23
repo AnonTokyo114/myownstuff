@@ -26,13 +26,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ui.widgets import DeviceSelector
+from ui.widgets import DeviceSelector, LogPane
 from ui.workers import run_async
 
 
@@ -263,28 +262,16 @@ class StagePage(QWidget):
         # ------------------------------------------------ 右：日志
         right = QVBoxLayout()
         right.setSpacing(6)
-        log_head = QHBoxLayout()
-        lab = QLabel("Log")
-        lab.setObjectName("fieldLabel")
-        log_head.addWidget(lab)
-        log_head.addStretch(1)
+        self.log = LogPane()                 # 跟随布局伸展
         self.save_log_btn = QPushButton("Save…")
         self.save_log_btn.setObjectName("ghost")
         self.save_log_btn.setFixedWidth(70)
-        log_head.addWidget(self.save_log_btn)
-        self.clear_log_btn = QPushButton("Clear")
-        self.clear_log_btn.setObjectName("ghost")
-        self.clear_log_btn.setFixedWidth(70)
-        log_head.addWidget(self.clear_log_btn)
-        right.addLayout(log_head)
+        self.log.add_header_button(self.save_log_btn)   # 导出按钮在 Clear 左边
+        right.addWidget(self.log, 1)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("numericBox")
-        # 只保留最近几千行：长采集时日志会无限增长，
-        # 完整日志应该落盘，界面上留个窗口就够
-        self.log_view.setMaximumBlockCount(3000)
-        right.addWidget(self.log_view, 1)
+        # 兼容旧引用（_append_log / save_log 等还在用这两个名字）
+        self.log_view = self.log.view
+        self.clear_log_btn = self.log.clear_btn
 
         body.addLayout(right, 1)
         outer.addLayout(body, 1)
@@ -307,7 +294,6 @@ class StagePage(QWidget):
         self.halt_btn.clicked.connect(self.do_halt)
         self.origin_btn.clicked.connect(self.do_define_origin)
         self.center_btn.clicked.connect(self.do_center_and_zero)
-        self.clear_log_btn.clicked.connect(self.log_view.clear)
         self.save_log_btn.clicked.connect(self.save_log)
         self.verbose_box.currentIndexChanged.connect(self._on_verbose_changed)
 
@@ -326,8 +312,7 @@ class StagePage(QWidget):
         }
 
     def _append_log(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        self.log.append(text)
 
     def _on_connected(self, _device) -> None:
         self._update_units()

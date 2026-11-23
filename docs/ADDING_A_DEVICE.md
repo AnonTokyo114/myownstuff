@@ -200,11 +200,11 @@ import time
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
+    QFrame, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from ui.widgets import DeviceSelector
+from ui.widgets import DeviceSelector, LogPane
 from ui.workers import run_async
 
 
@@ -264,12 +264,9 @@ class PowerMeterPage(QWidget):
         outer.addWidget(box)
 
         # 可见的日志区：设备说什么、失败原因是什么，都在这里
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("numericBox")
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFixedHeight(110)
-        outer.addWidget(self.log_view)
+        # （时间戳、3000 行上限、Clear 都由 LogPane 负责）
+        self.log = LogPane(height=110)
+        outer.addWidget(self.log)
 
         # 驱动通过 log_callback 发出来的消息（握手、协议响应、诊断）
         # 也要落到这个日志框 —— _device_options 里把它们转成了 log_line，
@@ -286,8 +283,7 @@ class PowerMeterPage(QWidget):
         QMessageBox.critical(self, "Connect failed", msg)
 
     def _append_log(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        self.log.append(text)
 
     def _on_connected(self, device) -> None:
         # 设备换了（或重连了）：在途读取的结果不能再落到界面上

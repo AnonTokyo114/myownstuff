@@ -31,6 +31,7 @@ MODULES = [
     ("ui/theme.py", "全局样式表（否则危险按钮没有样式）"),
     ("ui/settings.py", "连接参数记忆（settings.ini）"),
     ("ui/workers.py", "后台任务"),
+    ("ui/widgets/log_pane.py", "统一的日志区（Stage / DAQ / FilterWheel 共用）"),
     ("ui/widgets/device_selector.py", "设备选择 + 连接组件"),
     ("ui/pages/stage_page.py", "Stage Controller 页面"),
 ]
