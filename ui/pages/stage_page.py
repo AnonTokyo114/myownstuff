@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets import DeviceSelector, LogPane
-from ui.workers import run_async
+from ui.workers import DeviceTaskSession, run_async
 
 
 class CenterZeroDialog(QDialog):
@@ -104,6 +104,9 @@ class StagePage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
+        #: 连接/断开/关窗时递增，作废在途的位置读取
+        self._session = 0
+        self._tasks = DeviceTaskSession(self)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -315,11 +318,17 @@ class StagePage(QWidget):
         self.log.append(text)
 
     def _on_connected(self, _device) -> None:
+        # 新会话：之前那次连接留下的在途读取到此作废
+        self._session += 1
         self._update_units()
         self._update_controls()
         self.refresh_position()
 
     def _on_disconnected(self) -> None:
+        # 断开后不存在「进行中的读取」：作废在途任务并清掉忙状态，
+        # 否则新连接的首次自动刷新会被旧 _busy 挡掉。
+        self._session += 1
+        self._busy = False
         self.x_value.setText("—")
         self.y_value.setText("—")
         self._update_units()
@@ -382,24 +391,29 @@ class StagePage(QWidget):
 
     # ------------------------------------------------------------------ 位置
     def refresh_position(self) -> None:
+        """读一次 XY 位置。
+
+        走 DeviceTaskSession：执行前和回调前各校验一次会话，断开 / 重连 /
+        关窗之后旧结果不会再写进坐标显示。运动、归零和 HALT 仍走原来的
+        实现 —— 那几处要的是硬件侧的取消语义，不是回调守卫。
+        """
         if self._no_device() or self._busy:
             return
         dev = self.device
 
-        def work():
-            return dev.get_position("x"), dev.get_position("y")
-
-        def done(result) -> None:
+        def on_done(result) -> None:
             x, y = result
             self.x_value.setText(f"{x:.0f}")
             self.y_value.setText(f"{y:.0f}")
             self._set_busy(False)
 
-        def failed(msg: str) -> None:
+        def on_failed(msg: str) -> None:
             self._set_busy(False, f"Read position failed: {msg}")
 
         self._set_busy(True, "Reading position…")
-        run_async(work, done, failed)
+        self._tasks.submit(
+            lambda: (dev.get_position("x"), dev.get_position("y")),
+            on_done=on_done, on_failed=on_failed)
 
     def _go(self, axis: str) -> None:
         if self._no_device() or self._blocked():
@@ -554,6 +568,8 @@ class StagePage(QWidget):
         主窗口关闭不会触发子页面的 closeEvent，所以由 MainWindow 统一
         调用（见 ui/main_window.py 的 closeEvent）。
         """
+        # 先作废在途的读取：关窗之后回包不能再写控件
+        self._session += 1
         try:
             self.selector.force_disconnect()
         except Exception:                            # noqa: BLE001
