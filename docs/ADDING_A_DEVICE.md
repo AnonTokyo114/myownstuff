@@ -200,11 +200,12 @@ import time
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from ui.widgets import DeviceSelector
+from ui.workers import run_async
 
 
 class PowerMeterPage(QWidget):
@@ -214,6 +215,9 @@ class PowerMeterPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
+        #: 每次连接/断开/重新读取都递增，让在途读取的回调失效
+        self._generation = 0
+        self._bound = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -232,6 +236,8 @@ class PowerMeterPage(QWidget):
         self.selector.log.connect(self._append_log)
         self.selector.connected.connect(self._on_connected)
         self.selector.disconnected.connect(self._on_disconnected)
+        # 连接失败必须**看得见**：pythonw 下没有控制台，只 print 等于没提示
+        self.selector.failed.connect(self._on_connect_failed)
         outer.addWidget(self.selector)
 
         # ---------------- 你自己的一块 ----------------
@@ -244,6 +250,11 @@ class PowerMeterPage(QWidget):
         self.reading.setObjectName("monoBig")
         box_layout.addWidget(self.reading)
 
+        self.status_label = QLabel("Not connected")
+        self.status_label.setObjectName("pageSubtitle")
+        self.status_label.setWordWrap(True)
+        box_layout.addWidget(self.status_label)
+
         self.read_btn = QPushButton("Read power")
         self.read_btn.setObjectName("primary")
         self.read_btn.setEnabled(False)
@@ -251,35 +262,85 @@ class PowerMeterPage(QWidget):
         box_layout.addWidget(self.read_btn)
 
         outer.addWidget(box)
-        outer.addStretch(1)
+
+        # 可见的日志区：设备说什么、失败原因是什么，都在这里
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setObjectName("numericBox")
+        self.log_view.setMaximumBlockCount(3000)
+        self.log_view.setFixedHeight(110)
+        outer.addWidget(self.log_view)
 
     # ------------------------------------------------------------------
     def _device_options(self) -> dict:
         return {"log_callback": self.log_line.emit}
 
-    def _append_log(self, text: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] {text}")
+    def _on_connect_failed(self, msg: str) -> None:
+        self.status_label.setText(f"Connect failed: {msg}")
+        self._append_log(f"Connect failed: {msg}")
+        QMessageBox.critical(self, "Connect failed", msg)
 
-    def _on_connected(self, _device) -> None:
+    def _append_log(self, text: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        self.log_view.appendPlainText(f"[{stamp}] {text}")
+
+    def _on_connected(self, device) -> None:
+        # 设备换了（或重连了）：在途读取的结果不能再落到界面上
+        self._generation += 1
+        self._bound = device
         self.read_btn.setEnabled(True)
+        self.status_label.setText("Connected")
 
     def _on_disconnected(self) -> None:
+        self._generation += 1
+        self._bound = None
+        self._busy = False
         self.read_btn.setEnabled(False)
         self.reading.setText("— W")
+        self.status_label.setText("Disconnected")
 
     def read_power(self) -> None:
+        """读一次：设备 I/O 放后台，控件只在主线程更新。
+
+        串口默认读超时 2 秒、LAN 3 秒 —— 直接写在槽里会把窗口卡住那么久。
+        """
         dev = self.selector.device
-        if dev is None:
+        if dev is None or self._busy:
             return
-        try:
-            value = dev.read_power()
+
+        self._busy = True
+        self._generation += 1
+        generation = self._generation
+        bound = dev
+        self.read_btn.setEnabled(False)
+        self.status_label.setText("Reading…")
+
+        def work():
+            return dev.read_power()
+
+        def done(value) -> None:
+            if generation != self._generation or bound is not self._bound:
+                return                           # 已断开 / 重连 / 又读了一次
+            self._busy = False
+            self.read_btn.setEnabled(True)
             self.reading.setText(f"{value:.6g} W")
-        except Exception as exc:                 # noqa: BLE001
-            QMessageBox.critical(self, "Read failed", str(exc))
+            self.status_label.setText("Connected")
+
+        def failed(msg: str) -> None:
+            if generation != self._generation or bound is not self._bound:
+                return
+            self._busy = False
+            self.read_btn.setEnabled(True)
+            self.status_label.setText(f"Read failed: {msg}")
+            self._append_log(f"Read failed: {msg}")
+            QMessageBox.critical(self, "Read failed", msg)
+
+        run_async(work, done, failed)
 
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
         """主窗口关闭 / 独立窗口关闭时调用，**必须实现**。"""
+        self._generation += 1                    # 让在途读取作废
         try:
             self.selector.force_disconnect()
         except Exception:                        # noqa: BLE001
@@ -291,6 +352,10 @@ class PowerMeterPage(QWidget):
 ```
 
 **必须实现 `cleanup()`** —— 主窗口关闭时靠它收尾（子页面不会收到 `closeEvent`）。
+
+**读设备务必走 `run_async`** —— 上面 `read_power` 就是模板：`work()` 在后台跑，
+`done` / `failed` 回到主线程改控件，并且用 `_generation` + `_bound` 校验，
+这样断开/重连之后迟到的结果不会覆盖新界面。
 
 ---
 

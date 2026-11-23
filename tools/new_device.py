@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """新增设备的脚手架：生成驱动 / 界面 / 独立入口三个文件。
 
 用法
@@ -11,23 +10,48 @@
 devicegui/base.py）。那两处不自动改，因为它们是静态表，结构可能变，
 让脚本去猜反而容易写坏。
 
-设计约定（照抄现有设备就是对的）
---------------------------------
-* 驱动只依赖 Transport，不直接碰 pyserial / socket
-* 必须提供 connect / close / is_connected / _log
-* 有危险动作的设备要有 halt() / stop()，关闭窗口时会被自动调用
-* 页面必须实现 cleanup()（主窗口关闭时只有它会调）
+安全约定
+--------
+* 所有用户提供的字符串都用 ``repr()`` 生成 Python 字面量，双引号、
+  反斜杠、换行都不会破坏生成的源码
+* 类名 / 模块名先校验（合法标识符、不是关键字），不合规直接拒绝
+* **先把三个文件全部渲染并编译通过，再落盘** —— 中途失败不会留下
+  半成品，也不会在 --force 下提前覆盖已有文件
 """
 
 from __future__ import annotations
 
 import argparse
+import keyword
 import re
 import sys
 from pathlib import Path
 
 #: 项目根（tools/new_device.py -> 项目根）
 ROOT = Path(__file__).resolve().parent.parent
+
+
+# ======================================================================
+# 转义工具
+# ======================================================================
+def py_literal(value: str) -> str:
+    """生成一个能安全嵌进 Python 源码的字符串字面量（带引号）。
+
+    ``repr`` 会自动挑引号并转义反斜杠、换行、控制字符 ——
+    名字里有 ``"`` 或 ``\\`` 时不会破坏生成的语法。
+    """
+    return repr(str(value))
+
+
+def doc_escape(value: str) -> str:
+    """把文本转义成可以放进 ``\"\"\"...\"\"\"`` 文档字符串的形式。
+
+    文档字符串里反斜杠仍是转义符（``\\n`` 会变成换行），三引号会
+    提前结束字符串，所以这两样都要处理。
+    """
+    return (str(value)
+            .replace("\\", "\\\\")
+            .replace('"""', '\\"\\"\\"'))
 
 
 # ======================================================================
@@ -44,7 +68,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-log = logging.getLogger("@KIND@")
+log = logging.getLogger("@KIND_LIT@")
 
 
 class @CLASS@Error(RuntimeError):
@@ -92,14 +116,14 @@ class @CLASS@:
             # TODO: 握手 / *IDN? 之类的身份校验
             # self.transport.write(b"*IDN?\\n")
             # reply = self.transport.read_until(b"\\n")
-            # if b"@EXPECT@ " not in reply:
+            # if b"@EXPECT@" not in reply:
             #     raise @CLASS@Error(f"unexpected identity: {reply!r}")
             pass
         except Exception:
             self.transport.close()
             raise
         self._connected = True
-        self._log("@TITLE@ connected")
+        self._log("@TITLE_LOG@ connected")
         return self
 
     def close(self) -> None:
@@ -109,7 +133,7 @@ class @CLASS@:
             self.transport.close()
         except Exception:                        # noqa: BLE001
             pass
-        self._log("@TITLE@ closed")
+        self._log("@TITLE_LOG@ closed")
 
     # ---------------------------------------------------------------- 功能
     def read_@METHOD@(self) -> float:
@@ -130,18 +154,18 @@ class @CLASS@:
 
         关闭窗口时会按 halt -> stop -> close 的顺序调用。
         """
-        self._log("@TITLE@ HALT")
+        self._log("@TITLE_LOG@ HALT")
 
     def stop(self) -> None:
         """停止当前动作但保持连接（可选）。"""
         if self._connected:
-            self._log("@TITLE@ stop")
+            self._log("@TITLE_LOG@ stop")
 
 
 class Placeholder@CLASS@:
     """无硬件时用这个走通界面流程。
 
-    行为要**和真机一致**：同样的方法名、同样的返回值形状，
+    行为要和真机一致：同样的方法名、同样的返回值形状，
     只是不发真实命令。这样界面代码不需要为占位设备写分支。
     """
 
@@ -171,7 +195,7 @@ class Placeholder@CLASS@:
 
     def connect(self):
         self._connected = True
-        self._log("Placeholder @TITLE@ connected (no hardware)")
+        self._log("Placeholder @TITLE_LOG@ connected (no hardware)")
         return self
 
     def close(self) -> None:
@@ -194,7 +218,7 @@ class Placeholder@CLASS@:
 '''
 
 
-PAGE_TEMPLATE = '''"""@TITLE@ 页面。
+PAGE_TEMPLATE = '''"""@TITLE_DOC@ 页面。
 
 骨架几乎都落在 DeviceSelector 上，这里只加自己的控件。
 """
@@ -206,40 +230,49 @@ import time
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ui.widgets import DeviceSelector
+from ui.workers import run_async
 
 
 class @CLASS@Page(QWidget):
-    page_title = "@TITLE@"
+    page_title = @TITLE_LIT@
     log_line = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
+        self._busy = False
+        #: 每次连接/断开都递增，让在途读取的回调失效
+        self._generation = 0
+        self._bound = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
         outer.setSpacing(10)
 
-        title = QLabel("@TITLE@")
+        title = QLabel(@TITLE_LIT@)
         title.setObjectName("pageTitle")
         outer.addWidget(title)
 
         # 统一组件：设备下拉 + Connection + Connect
         self.selector = DeviceSelector(
-            kind="@KIND@",
+            kind=@KIND_LIT@,
             device_options=self._device_options,
             hint="Pick the instrument, then Connect.",
         )
         self.selector.log.connect(self._append_log)
         self.selector.connected.connect(self._on_connected)
         self.selector.disconnected.connect(self._on_disconnected)
+        # 连接失败必须**看得见**：pythonw 下没有控制台，只 print 等于没提示
+        self.selector.failed.connect(self._on_connect_failed)
         outer.addWidget(self.selector)
 
         # ---------------- 自己的控件 ----------------
@@ -253,39 +286,110 @@ class @CLASS@Page(QWidget):
         self.reading.setObjectName("monoBig")
         box_layout.addWidget(self.reading)
 
+        self.status_label = QLabel("Not connected")
+        self.status_label.setObjectName("pageSubtitle")
+        self.status_label.setWordWrap(True)
+        box_layout.addWidget(self.status_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self.read_btn = QPushButton("Read")
         self.read_btn.setObjectName("primary")
         self.read_btn.setEnabled(False)
         self.read_btn.clicked.connect(self.read_value)
-        box_layout.addWidget(self.read_btn)
+        btn_row.addWidget(self.read_btn)
+        btn_row.addStretch(1)
+        box_layout.addLayout(btn_row)
 
         outer.addWidget(box)
-        outer.addStretch(1)
+
+        log_head = QHBoxLayout()
+        log_head.setSpacing(6)
+        log_lab = QLabel("Log")
+        log_lab.setObjectName("fieldLabel")
+        log_head.addWidget(log_lab)
+        log_head.addStretch(1)
+        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn.setObjectName("ghost")
+        self.clear_log_btn.setFixedWidth(70)
+        log_head.addWidget(self.clear_log_btn)
+        outer.addLayout(log_head)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setObjectName("numericBox")
+        self.log_view.setMaximumBlockCount(3000)
+        self.log_view.setFixedHeight(110)
+        outer.addWidget(self.log_view)
+
+        self.clear_log_btn.clicked.connect(self.log_view.clear)
 
     # ------------------------------------------------------------------
     def _device_options(self) -> dict:
         return {"log_callback": self.log_line.emit}
 
     def _append_log(self, text: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] {text}")
+        stamp = time.strftime("%H:%M:%S")
+        self.log_view.appendPlainText(f"[{stamp}] {text}")
 
-    def _on_connected(self, _device) -> None:
+    def _on_connect_failed(self, msg: str) -> None:
+        self.status_label.setText(f"Connect failed: {msg}")
+        self._append_log(f"Connect failed: {msg}")
+        QMessageBox.critical(self, "Connect failed", msg)
+
+    def _on_connected(self, device) -> None:
+        # 设备换了（或重连了）：在途读取的结果不能再落到界面上
+        self._generation += 1
+        self._bound = device
         self.read_btn.setEnabled(True)
+        self.status_label.setText("Connected")
 
     def _on_disconnected(self) -> None:
+        self._generation += 1
+        self._bound = None
+        self._busy = False
         self.read_btn.setEnabled(False)
         self.reading.setText("—")
+        self.status_label.setText("Disconnected")
 
     def read_value(self) -> None:
+        """读一次：设备 I/O 放后台，控件只在主线程更新。
+
+        串口默认读超时是 2 秒、LAN 是 3 秒，直接放在槽里会把整个窗口
+        卡住那么久。
+        """
         dev = self.selector.device
-        if dev is None:
+        if dev is None or self._busy:
             return
-        try:
-            value = dev.read_@METHOD@()
-        except Exception as exc:                 # noqa: BLE001
-            QMessageBox.critical(self, "Read failed", str(exc))
-            return
-        self.reading.setText(f"{value:.6g}")
+
+        self._busy = True
+        self._generation += 1
+        generation = self._generation
+        bound = dev
+        self.read_btn.setEnabled(False)
+        self.status_label.setText("Reading…")
+
+        def work():
+            return dev.read_@METHOD@()
+
+        def done(value) -> None:
+            if generation != self._generation or bound is not self._bound:
+                return                       # 已断开 / 重连 / 又读了一次
+            self._busy = False
+            self.read_btn.setEnabled(True)
+            self.reading.setText(f"{value:.6g}")
+            self.status_label.setText("Connected")
+
+        def failed(msg: str) -> None:
+            if generation != self._generation or bound is not self._bound:
+                return
+            self._busy = False
+            self.read_btn.setEnabled(True)
+            self.status_label.setText(f"Read failed: {msg}")
+            self._append_log(f"Read failed: {msg}")
+            QMessageBox.critical(self, "Read failed", msg)
+
+        run_async(work, done, failed)
 
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
@@ -293,6 +397,7 @@ class @CLASS@Page(QWidget):
 
         子页面收不到 closeEvent，主窗口靠这个方法收尾。
         """
+        self._generation += 1            # 让在途读取作废
         try:
             self.selector.force_disconnect()
         except Exception:                        # noqa: BLE001
@@ -309,7 +414,7 @@ def create_page() -> QWidget:
 '''
 
 
-APP_TEMPLATE = '''"""@TITLE@ 的独立入口。
+APP_TEMPLATE = '''"""@TITLE_DOC@ 的独立入口。
 
 用法：python -m devicegui.@KIND@_app
 """
@@ -319,7 +424,7 @@ import sys
 from devicegui.base import run_device_app
 
 if __name__ == "__main__":
-    sys.exit(run_device_app("@KIND@"))
+    sys.exit(run_device_app(@KIND_LIT@))
 '''
 
 
@@ -328,13 +433,15 @@ if __name__ == "__main__":
 # ======================================================================
 def registration_hint(kind: str, title: str, transports: tuple[str, ...],
                       cls: str) -> str:
-    transports_py = ", ".join(f'"{t}"' for t in transports)
+    kind_lit = py_literal(kind)
+    title_lit = py_literal(title)
+    transports_py = ", ".join(py_literal(t) for t in transports)
     return f'''
 ======================================================================
 还差两处**手工登记**（脚本不自动改，避免写坏静态表）
 ======================================================================
 
-① core/devices.py —— 在 DEVICES 里加一个 @KIND@ 类目：
+① core/devices.py —— 在 DEVICES 里加一个 {kind} 类目：
 
     from core import {kind} as {kind}_mod
 
@@ -347,10 +454,10 @@ def registration_hint(kind: str, title: str, transports: tuple[str, ...],
         return {kind}_mod.Placeholder{cls}(transport, **options)
 
 
-    DEVICES["{kind}"] = [
+    DEVICES[{kind_lit}] = [
         DeviceSpec(
-            key="{kind}_default",
-            name="{title}",
+            key={py_literal(kind + "_default")},
+            name={title_lit},
             transports=({transports_py},),
             description="TODO: one line about this instrument.",
             factory=_make_{kind},
@@ -368,17 +475,17 @@ def registration_hint(kind: str, title: str, transports: tuple[str, ...],
 
     a) DEVICE_APPS 里加一项：
 
-    "{kind}": DeviceApp(
-        key="{kind}",
-        title="{title}",
+    {kind_lit}: DeviceApp(
+        key={kind_lit},
+        title={title_lit},
         icon="◐",
         summary="TODO: one line for the Device Interface card.",
-        module="devicegui.{kind}_app",
+        module={py_literal("devicegui." + kind + "_app")},
     ),
 
     b) create_device_window() 里加一个分支：
 
-    if kind == "{kind}":
+    if kind == {kind_lit}:
         from ui.pages.{kind}_page import {cls}Page
         return {cls}Page()
 
@@ -399,9 +506,44 @@ def registration_hint(kind: str, title: str, transports: tuple[str, ...],
 
 # ======================================================================
 def snake_to_class(name: str) -> str:
-    """powermeter -> PowerMeter，power_meter -> PowerMeter。"""
+    """powermeter -> Powermeter，power_meter -> PowerMeter。"""
     parts = re.split(r"[_\-\s]+", name.strip())
     return "".join(p[:1].upper() + p[1:] for p in parts if p)
+
+
+def _render(kind: str, title: str, cls: str, transports: tuple[str, ...],
+            method: str, expect: str) -> list[tuple[Path, str]]:
+    """把三个文件全部渲染到内存（不落盘）。"""
+    common = {
+        # 注意 @TITLE@ 是 @TITLE_LIT@ / @TITLE_DOC@ 的前缀，
+        # 靠下面的「长键先替换」保证三者的替换顺序正确
+        "@TITLE@": doc_escape(title),
+        "@TITLE_LIT@": py_literal(title),
+        "@TITLE_DOC@": doc_escape(title),
+        "@TITLE_LOG@": doc_escape(title).replace('"', "'"),
+        "@CLASS@": cls,
+        "@KIND_LIT@": py_literal(kind),
+        "@KIND@": kind,
+        "@METHOD@": method,
+        "@EXPECT@": doc_escape(expect),
+    }
+
+    def fill(template: str) -> str:
+        out = template
+        # 先替换长键，避免 @TITLE@ 吃掉 @TITLE_LIT@ 的前缀
+        for key in sorted(common, key=len, reverse=True):
+            out = out.replace(key, common[key])
+        return out
+
+    driver = (fill(DRIVER_TEMPLATE)
+              .replace("@TRANSPORTS@", ", ".join(
+                  py_literal(t) for t in transports)))
+
+    return [
+        (ROOT / "core" / f"{kind}.py", driver),
+        (ROOT / "ui" / "pages" / f"{kind}_page.py", fill(PAGE_TEMPLATE)),
+        (ROOT / "devicegui" / f"{kind}_app.py", fill(APP_TEMPLATE)),
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,14 +552,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("kind", help="设备类目，同时用作模块名，如 powermeter")
     parser.add_argument("--name", default=None,
                         help="显示名称，如 'Thorlabs PM100'（默认用 kind）")
+    parser.add_argument("--class-name", default=None, dest="class_name",
+                        help="生成的类名（默认由 kind 推导）。"
+                             "powermeter 这种连写的词建议显式给 PowerMeter")
     parser.add_argument("--transports", default="serial",
                         help="逗号分隔：serial,lan,gpib,local（默认 serial）")
     parser.add_argument("--method", default="value",
                         help="驱动里那个『读一个值』的方法名，"
                              "最终生成 read_<method>()（默认 value）")
-    parser.add_argument("--class-name", default=None, dest="class_name",
-                        help="生成的类名（默认由 kind 推导）。"
-                             "powermeter 这种连写的词建议显式给 PowerMeter")
     parser.add_argument("--expect", default=None,
                         help="握手时期望在 *IDN? 回包里出现的字样"
                              "（默认用 kind 的大写）")
@@ -427,10 +569,27 @@ def main(argv: list[str] | None = None) -> int:
                         help="覆盖已存在的文件")
     args = parser.parse_args(argv)
 
+    # ---------------- 校验：全部在生成之前 ----------------
     kind = args.kind.strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9_]*", kind):
         print(f"  ✗ kind 只能是小写字母/数字/下划线，且以字母开头：{kind!r}",
               file=sys.stderr)
+        return 2
+    if keyword.iskeyword(kind):
+        print(f"  ✗ kind 是 Python 关键字，不能当模块名：{kind!r}",
+              file=sys.stderr)
+        return 2
+
+    title = (args.name or kind).strip()
+    cls = (args.class_name or snake_to_class(kind)).strip()
+    if not cls.isidentifier() or keyword.iskeyword(cls):
+        print(f"  ✗ class-name 不是合法的 Python 类名：{cls!r}",
+              file=sys.stderr)
+        return 2
+
+    method = args.method.strip().lower().replace("-", "_")
+    if not method.isidentifier() or keyword.iskeyword(method):
+        print(f"  ✗ method 不是合法的标识符：{method!r}", file=sys.stderr)
         return 2
 
     transports = tuple(t.strip() for t in args.transports.split(",") if t.strip())
@@ -443,27 +602,18 @@ def main(argv: list[str] | None = None) -> int:
     if not transports:
         transports = ("serial",)
 
-    title = (args.name or kind).strip()
-    cls = (args.class_name or snake_to_class(kind)).strip()
     expect = (args.expect or kind).upper()
-    method = args.method.strip().lower().replace("-", "_")
 
-    files: list[tuple[Path, str]] = [
-        (ROOT / "core" / f"{kind}.py",
-         DRIVER_TEMPLATE
-         .replace("@TITLE@", title).replace("@CLASS@", cls)
-         .replace("@KIND@", kind).replace("@METHOD@", method)
-         .replace("@TRANSPORTS@", ", ".join(f'"{t}"' for t in transports))
-         .replace("@EXPECT@", expect)),
-        (ROOT / "ui" / "pages" / f"{kind}_page.py",
-         PAGE_TEMPLATE
-         .replace("@TITLE@", title).replace("@CLASS@", cls)
-         .replace("@KIND@", kind).replace("@METHOD@", method)),
-        (ROOT / "devicegui" / f"{kind}_app.py",
-         APP_TEMPLATE
-         .replace("@TITLE@", title)
-         .replace("@KIND@", kind)),
-    ]
+    # ---------------- 渲染 + 编译：还没写任何文件 ----------------
+    files = _render(kind, title, cls, transports, method, expect)
+    for path, content in files:
+        try:
+            compile(content, str(path), "exec")
+        except SyntaxError as exc:
+            print(f"  ✗ 生成的 {path.name} 编译不过：{exc}", file=sys.stderr)
+            print("  什么都没写 —— 请检查 --name / --class-name 里的特殊字符。",
+                  file=sys.stderr)
+            return 1
 
     print()
     print(f"  设备类目: {kind}")
@@ -473,6 +623,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  读取方法: read_{method}()")
     print()
 
+    if args.dry_run:
+        for path, content in files:
+            print(f"  --- {path} ---")
+            print(content)
+        print(registration_hint(kind, title, transports, cls))
+        return 0
+
     existing = [p for p, _ in files if p.exists()]
     if existing and not args.force:
         for path in existing:
@@ -481,22 +638,10 @@ def main(argv: list[str] | None = None) -> int:
         print("  什么都没写。", file=sys.stderr)
         return 1
 
-    if args.dry_run:
-        for path, content in files:
-            print(f"  --- {path} ---")
-            print(content)
-        print(registration_hint(kind, title, transports, cls))
-        return 0
-
+    # ---------------- 落盘：上面都通过了 ----------------
     for path, content in files:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
-        # 立刻编译一次，别把语法错误留给用户
-        try:
-            compile(content, str(path), "exec")
-        except SyntaxError as exc:
-            print(f"  ✗ 生成的 {path} 有语法错误：{exc}", file=sys.stderr)
-            return 1
         print(f"  ✓ 写入 {path.relative_to(ROOT)}")
 
     print(registration_hint(kind, title, transports, cls))
