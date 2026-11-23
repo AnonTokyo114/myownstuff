@@ -2561,6 +2561,93 @@ def run_async(fn, on_done, on_error) -> None:
     QThreadPool.globalInstance().start(worker)
 
 
+# ======================================================================
+# 设备任务会话
+# ======================================================================
+#: work() 在发现会话已过期时返回这个哨兵，done 里据此跳过
+_CANCELLED = object()
+
+
+class DeviceTaskSession:
+    """一次设备操作的会话守卫。
+
+    设备页面反复写同一段东西：提交时记下「代次 + 设备」，执行前比一次，
+    回调回来再比一次，不一致就丢弃。这段逻辑散在各页面里，每加一个操作
+    就有一次漏掉某个分支的机会。
+
+    这里把它收成一处。宿主（页面）只需要提供两个**现有**的真值：
+
+    ``owner._session``
+        整数代次。连接、断开、关闭窗口时递增 —— 递增之后所有在途任务
+        自动过期，不需要额外通知。
+    ``owner.device``
+        当前绑定的设备，可能是 ``None``。
+
+    用法::
+
+        self._tasks = DeviceTaskSession(self)
+
+        self._tasks.submit(
+            lambda: dev.snapshot(),
+            on_done=self._apply_state,
+            on_failed=lambda msg: self._set_busy(False, msg),
+        )
+
+    ``on_stale`` 在任务过期时调用（可选）。**默认什么都不做** ——
+    会话都换了，旧任务不应再去动界面或忙碌状态，那是新会话的事。
+    """
+
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    # ------------------------------------------------------------------
+    def generation(self) -> int:
+        """当前代次（宿主递增它就作废在途任务）。"""
+        return self._owner._session
+
+    def _snapshot(self):
+        return self._owner._session, self._owner.device
+
+    def _still_valid(self, generation, device) -> bool:
+        return (generation == self._owner._session
+                and device is not None
+                and device is self._owner.device)
+
+    # ------------------------------------------------------------------
+    def submit(self, work, *, on_done=None, on_failed=None,
+               on_stale=None) -> None:
+        """提交一次设备操作。
+
+        ``work()`` 在后台线程跑（不许碰 Qt）；``on_done`` / ``on_failed``
+        回到主线程。三者都会先校验会话，过期就静默丢弃。
+        """
+        generation, device = self._snapshot()
+
+        def runner():
+            # 执行前校验：排队期间可能已经断开 / 重连 / 关窗
+            if not self._still_valid(generation, device):
+                return _CANCELLED
+            return work()
+
+        def done(value) -> None:
+            if value is _CANCELLED or not self._still_valid(generation, device):
+                if on_stale is not None:
+                    on_stale()
+                return
+            if on_done is not None:
+                on_done(value)
+
+        def failed(msg: str) -> None:
+            if not self._still_valid(generation, device):
+                if on_stale is not None:
+                    on_stale()
+                return
+            if on_failed is not None:
+                on_failed(msg)
+
+        run_async(runner, done, failed)
+
+
 # ====================================================================
 #  统一的日志区（Stage / DAQ / FilterWheel 共用）   （源：ui/widgets/log_pane.py）
 # ====================================================================

@@ -157,3 +157,117 @@ class TestSlotsNotApplied(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ======================================================================
+# DeviceTaskSession 试点：状态读取的会话边界
+# ======================================================================
+class _SnapshotDevice:
+    """可控快照设备：返回固定状态，或抛指定异常。"""
+
+    def __init__(self, state=None, error=None):
+        self.identity = "FAKE-FW"
+        self._state = state if state is not None else {
+            "position": 3, "count": 6, "speed": 0,
+        }
+        self._error = error
+        self.calls = 0
+
+    def snapshot(self):
+        self.calls += 1
+        if self._error is not None:
+            raise RuntimeError(self._error)
+        return dict(self._state)
+
+
+class TestRefreshStateSession(_Base):
+    """refresh_state 迁到 DeviceTaskSession 之后的三条验收。"""
+
+    def test_normal_read_restores_busy(self):
+        device = _SnapshotDevice()
+        page = self.make_page(device)
+        self.assertFalse(page._busy)
+
+        page.refresh_state()
+        self.assertTrue(page._busy, "提交后应进入忙碌")
+        self.pump(until=lambda: not page._busy)
+
+        self.assertFalse(page._busy, "读完后要退出忙碌")
+        self.assertEqual(device.calls, 1)
+        self.assertEqual(page._state.get("position"), 3)
+
+    def test_failed_read_restores_busy_and_reports(self):
+        device = _SnapshotDevice(error="review: wheel not responding")
+        page = self.make_page(device)
+
+        page.refresh_state()
+        self.pump(until=lambda: not page._busy)
+
+        self.assertFalse(page._busy, "失败后也要退出忙碌")
+        log = page.log.text()
+        self.assertIn("Read state failed", log)
+        self.assertIn("not responding", log)
+        self.assertTrue(page.refresh_btn.isEnabled(), "刷新按钮应恢复")
+
+    def test_old_result_after_reconnect_is_dropped(self):
+        """读取中断开重连：旧结果不能落到新连接上。"""
+        old = _SnapshotDevice(state={"position": 1, "count": 6, "speed": 0})
+        page = self.make_page(old)
+        pending = []
+
+        real = __import__("ui.workers", fromlist=["run_async"]).run_async
+
+        def capture(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.workers.run_async", capture):
+            page.refresh_state()
+        work, done, failed = pending[0]
+        value = work()
+
+        # 断开 -> 重连到另一台设备
+        page._session += 1
+        page.selector._device = _SnapshotDevice(
+            state={"position": 5, "count": 6, "speed": 0})
+        page._session += 1
+        page._busy = False
+
+        done(value)
+        self.app.processEvents()
+        self.assertNotEqual(page._state.get("position"), 1,
+                            "旧结果覆盖了新连接")
+
+        # 新会话读取正常
+        pending.clear()
+        with patch("ui.workers.run_async", capture):
+            page.refresh_state()
+        w2, d2, _f = pending[0]
+        d2(w2())
+        self.assertEqual(page._state.get("position"), 5)
+
+    def test_late_callback_after_close_is_dropped(self):
+        """读取中关闭窗口：迟到回调不再更新控件。"""
+        device = _SnapshotDevice()
+        page = self.make_page(device)
+        pending = []
+
+        def capture(work, done, failed):
+            pending.append((work, done, failed))
+
+        with patch("ui.workers.run_async", capture):
+            page.refresh_state()
+        work, done, failed = pending[0]
+        value = work()
+
+        page.cleanup()
+        page.selector._device = None
+        page._on_disconnected()
+        self.app.processEvents()
+        before = dict(page._state)
+
+        done(value)
+        failed("boom")
+        self.app.processEvents()
+
+        self.assertEqual(page._state, before, "关窗后旧结果写进了控件")
+        self.assertFalse(page._busy, "迟到的回调把忙碌状态改回来了")
+

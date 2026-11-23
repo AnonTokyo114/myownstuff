@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets import DeviceSelector, LogPane
-from ui.workers import run_async
+from ui.workers import DeviceTaskSession, run_async
 
 #: 设置项的选项表：(显示文字, 送给设备的值)
 TRIG_OPTIONS = [("Output — pulse when the move finishes", 1),
@@ -51,6 +51,8 @@ class FilterWheelPage(QWidget):
         #: 连接会话号。每次连接/断开都 +1；后台回调对不上号就丢弃，
         #: 避免旧设备的完成结果写到新连接的界面上。
         self._session = 0
+        #: 本轮启用的任务守卫（只用于状态读取；其它操作暂时仍走 _session）
+        self._tasks = DeviceTaskSession(self)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -244,32 +246,25 @@ class FilterWheelPage(QWidget):
 
     # ------------------------------------------------------------------ 状态
     def refresh_state(self) -> None:
+        """读一次滤光轮状态。
+
+        走 DeviceTaskSession：执行前和回调前各校验一次会话，断开/重连/
+        关窗之后旧结果不会再落到界面上（也不需要在这里手写 session 比对）。
+        """
         dev = self.device
         if dev is None or self._busy:
             return
 
-        session = self._session
-
-        def work():
-            return dev.snapshot()
-
-        def done(state) -> None:
-            if session != self._session:
-                self._append_log(
-                    "State read finished after the connection changed — "
-                    "result ignored.")
-                return
+        def on_done(state) -> None:
             self._apply_state(state)
             self._set_busy(False)
 
-        def failed(msg: str) -> None:
-            if session != self._session:
-                self._append_log(f"State read failed after switching: {msg}")
-                return
+        def on_failed(msg: str) -> None:
             self._set_busy(False, f"Read state failed: {msg}")
 
         self._set_busy(True, "Reading wheel state…")
-        run_async(work, done, failed)
+        self._tasks.submit(lambda: dev.snapshot(),
+                           on_done=on_done, on_failed=on_failed)
 
     def _apply_state(self, state: dict) -> None:
         """把从设备读回的状态铺到界面上（Refresh 和 Set slots 共用）。"""
