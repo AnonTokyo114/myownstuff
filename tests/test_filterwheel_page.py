@@ -272,4 +272,3 @@ class TestRefreshStateSession(_Base):
 
         self.assertEqual(page._state, before, "关窗后旧结果写进了控件")
         self.assertFalse(page._busy, "迟到的回调把忙碌状态改回来了")
-

@@ -148,17 +148,28 @@ class TestDeviceTaskSession(unittest.TestCase):
         self.assertIs(cap["fn"](), _CANCELLED)
 
     def test_owner_swap_with_same_generation_is_dropped(self):
-        """代次没变但设备对象换了（理论上不该发生）也要拦住。"""
+        """代次没变但设备对象换了（理论上不该发生）也要拦住。
+
+        这里必须**先**建 results 再传 on_done。之前写成先提交、后建列表，
+        那个列表永远不会被任务写入，断言恒成立 —— 把身份比较整个删掉
+        测试也照样通过。
+        """
         owner = _Owner(device=object())
         session = DeviceTaskSession(owner)
+        results = []
+        errors = []
 
-        cap = self._submit(session, lambda: 1)
+        cap = self._submit(session, lambda: 1,
+                           on_done=results.append,
+                           on_failed=errors.append)
         value = cap["fn"]()
         owner.device = object()                 # 直接换，不递增代次
-        results = []
-        cap["done"](value)
 
-        self.assertEqual(results, [])
+        cap["done"](value)
+        cap["failed"]("late error")
+
+        self.assertEqual(results, [], "换了设备之后旧结果仍被接受")
+        self.assertEqual(errors, [], "换了设备之后旧错误仍被接受")
 
 
 if __name__ == "__main__":
