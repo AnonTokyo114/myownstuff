@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.workers import run_async
+from ui.workers import DeviceTaskSession, run_async
 
 # 实时曲线是可选功能：没装 matplotlib 时面板照样能读数和存 CSV
 try:
@@ -656,6 +656,11 @@ class PhotonPanel(QWidget):
         self._update_controls()
 
     # ------------------------------------------------------------------
+    @property
+    def device(self):
+        """当前绑定的设备（DeviceTaskSession 靠它判断会话是否已变）。"""
+        return self._device
+
     def start(self) -> None:
         dev = self._device
         if dev is None:
@@ -1068,10 +1073,14 @@ class PulsePanel(QWidget):
         super().__init__(parent)
         self._device = None
         self._running = False
-        #: 操作序号。Stop 递增它，让尚未执行的旧 Start/Apply 失效 ——
-        #: 否则「点 Apply → 点 Stop → 旧 Apply 才执行」会让脉冲在
-        #: Stop 之后又跑起来。
+        #: 操作序号。每次 Start / Stop 都递增，让尚未执行的旧操作失效。
+        #: 这一层**不能**用连接会话号代替：同一连接里连按 Apply 两次，
+        #: 会话号不会变，但旧 Stop 的清理动作绝不能落到新任务上。
         self._generation = 0
+        #: 连接会话。断开 / 重连时递增 —— 与累计到面板的 _generation 是
+        #: 两个正交的维度，DeviceTaskSession 管前者。
+        self._session = 0
+        self._tasks = DeviceTaskSession(self)
         self._build()
 
     def _build(self) -> None:
@@ -1145,7 +1154,9 @@ class PulsePanel(QWidget):
     # ------------------------------------------------------------------
     def set_device(self, device) -> None:
         """绑定/解绑设备；解绑时清掉陈旧的运行标志。"""
-        # 连接会话变了：在途操作全部作废
+        # 连接会话变了：在途操作全部作废（会话号 + 操作序号一起递增，
+        # 这样无论旧任务是被哪一层拦下都成立）
+        self._session += 1
         self._generation += 1
         if device is None and self._running:
             self.interrupt()
@@ -1162,6 +1173,11 @@ class PulsePanel(QWidget):
         self._update_controls()
 
     # ------------------------------------------------------------------
+    @property
+    def device(self):
+        """当前绑定的设备（DeviceTaskSession 靠它判断会话是否已变）。"""
+        return self._device
+
     def start(self) -> None:
         dev = self._device
         if dev is None:
@@ -1177,17 +1193,15 @@ class PulsePanel(QWidget):
 
         self._generation += 1
         generation = self._generation
-        bound = dev                              # 这次操作绑定的设备
 
         def work():
-            if generation != self._generation or bound is not self._device:
-                return None                      # 已被 Stop / 解绑取消
+            # 走到这里说明会话和操作序号都还是本次的（submit 已校验）
             f_out, d_out, token = dev.start(
                 freq, duty,
                 counter=self.counter_edit.text().strip() or None)
             if generation != self._generation:
-                # 过期了：只撤销**自己启动的那个**任务。连续 Apply 时，
-                # 新任务已经把它顶掉了，无条件 stop() 停的是新任务。
+                # 启动期间又被 Stop / 新 Apply 顶替了：只撤销**自己启动的
+                # 那个**任务。无条件 stop() 停的是后来者的任务。
                 stopper = getattr(dev, "stop_if_still", None)
                 if callable(stopper):
                     try:
@@ -1198,9 +1212,8 @@ class PulsePanel(QWidget):
             return (f_out, d_out)
 
         def done(params) -> None:
-            if (generation != self._generation or params is None
-                    or bound is not self._device):
-                return                           # 过期 / 已取消 / 换了设备
+            if params is None:
+                return                           # work 里判定过期，自行撤销了
             f, d = params
             self._running = True
             self.status_label.setText(
@@ -1212,8 +1225,6 @@ class PulsePanel(QWidget):
             self._update_controls()
 
         def failed(msg: str) -> None:
-            if generation != self._generation or bound is not self._device:
-                return                           # 过期失败，不打扰用户
             self._running = False
             self.status_label.setText(f"Error (pulse not running): {msg}")
             self.log_line.emit(f"Pulse start failed: {msg}")
@@ -1223,7 +1234,11 @@ class PulsePanel(QWidget):
         self.status_label.setText(
             f"Starting pulse train: {freq:g} Hz, {duty:g} %…")
         self.busy_changed.emit(True)
-        run_async(work, done, failed)
+        # still_valid 是第二层：同一连接内又按了一次 Start/Stop 就作废。
+        # 会话层（断开/重连）由 DeviceTaskSession 自己管。
+        self._tasks.submit(
+            work, on_done=done, on_failed=failed,
+            still_valid=lambda: generation == self._generation)
 
     def stop(self) -> None:
         dev = self._device
@@ -1233,24 +1248,19 @@ class PulsePanel(QWidget):
         # 递增序号：所有「已提交但还没跑」的 Start 到这里就作废了
         self._generation += 1
         generation = self._generation
-        bound = dev
         # 捕获**提交时**正在输出的那个任务。work 真正执行时可能已经有
         # 更新的 Apply 顶替了它，那时不能停 —— 只过滤完成回调是不够的，
         # 硬件已经被停了，界面再对也只是表面一致。
         token = getattr(dev, "last_token", None)
 
         def work():
-            if generation != self._generation or bound is not self._device:
-                return None
+            # token 是提交时捕获的：只停**那个**任务，不是「当前任务」
             if token is not None and hasattr(dev, "stop_if_still"):
                 return dev.stop_if_still(token)
             return dev.stop()
 
         def done(error) -> None:
-            # Stop 的回调同样要校验：它可能在更新的 start 之后才回来，
-            # 那时设备正在跑，把界面设成 Stopped 就又和硬件对不上了。
-            if generation != self._generation or bound is not self._device:
-                return
+            # 能走到这里就说明这次 Stop 仍是最新操作：界面可以改成已停
             self._running = False
             if error:
                 self.status_label.setText(f"Stop reported an error: {error}")
@@ -1261,15 +1271,15 @@ class PulsePanel(QWidget):
             self._update_controls()
 
         def failed(msg: str) -> None:
-            if generation != self._generation or bound is not self._device:
-                return
             self._running = False
             self.status_label.setText(f"Stop failed: {msg}")
             self.log_line.emit(f"Pulse stop failed: {msg}")
             self._update_controls()
 
         self.busy_changed.emit(True)
-        run_async(work, done, failed)
+        self._tasks.submit(
+            work, on_done=done, on_failed=failed,
+            still_valid=lambda: generation == self._generation)
 
     # ------------------------------------------------------------------
     def _update_status(self) -> None:
@@ -1294,6 +1304,8 @@ class PulsePanel(QWidget):
         self.counter_edit.setEnabled(connected and not self._running)
 
     def interrupt(self) -> None:
+        # 关窗：会话作废，迟到的回调不再碰控件
+        self._session += 1
         self._running = False
         if self._device is not None:
             try:

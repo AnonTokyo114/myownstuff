@@ -222,7 +222,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.start()          # 提交但未执行
             panel.stop()           # 让上面那个失效
 
@@ -283,7 +283,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.start()
 
         work, done, _f = pending[0]
@@ -521,7 +521,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with _patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with _patch("ui.workers.run_async", fake_run_async):
             panel.freq_spin.setValue(2000.0)
             panel.start()
         old_work, old_done, _f = pending[0]
@@ -533,7 +533,7 @@ class DaqPageTest(unittest.TestCase):
         self.assertTrue(fake.entered.wait(5), "旧操作没进到 start")
 
         pending.clear()
-        with _patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with _patch("ui.workers.run_async", fake_run_async):
             panel.freq_spin.setValue(3000.0)
             panel.start()
         new_work, new_done, _f = pending[0]
@@ -635,7 +635,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             page.pulse.start()
 
         old_work, old_done, _f = pending[0]
@@ -696,7 +696,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.start()
 
         work, done, _f = pending[0]
@@ -743,7 +743,7 @@ class DaqPageTest(unittest.TestCase):
         def fake_run_async(work, done, failed):
             pending.append((work, done, failed))
 
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.start()
         start_work, start_done, _f = pending[0]
         start_done(start_work())
@@ -752,13 +752,13 @@ class DaqPageTest(unittest.TestCase):
 
         # 提交 Stop（回调暂缓）
         pending.clear()
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.stop()
         stop_work, stop_done, _f = pending[0]
 
         # Stop 还没回调时又 Apply 了一次
         pending.clear()
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.freq_spin.setValue(2500.0)
             panel.start()
         new_work, new_done, _f = pending[0]
@@ -820,7 +820,7 @@ class DaqPageTest(unittest.TestCase):
             pending.append((work, done, failed))
 
         # a. 启动
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.freq_spin.setValue(1000.0)
             panel.start()
         w, d, _f = pending[0]
@@ -829,13 +829,13 @@ class DaqPageTest(unittest.TestCase):
 
         # b. Stop 提交但 work 暂缓
         pending.clear()
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.stop()
         stop_work, stop_done, _f = pending[0]
 
         # c. 新 Apply 3000 先跑完
         pending.clear()
-        with patch("ui.widgets.daq_panels.run_async", fake_run_async):
+        with patch("ui.workers.run_async", fake_run_async):
             panel.freq_spin.setValue(3000.0)
             panel.start()
         nw, nd, _f = pending[0]

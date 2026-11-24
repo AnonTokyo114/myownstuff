@@ -2615,22 +2615,39 @@ class DeviceTaskSession:
 
     # ------------------------------------------------------------------
     def submit(self, work, *, on_done=None, on_failed=None,
-               on_stale=None) -> None:
+               on_stale=None, still_valid=None) -> None:
         """提交一次设备操作。
 
         ``work()`` 在后台线程跑（不许碰 Qt）；``on_done`` / ``on_failed``
         回到主线程。三者都会先校验会话，过期就静默丢弃。
+
+        ``still_valid``
+            调用方自己的额外校验（返回 bool）。有些面板除了「连接有没有变」
+            还要管「同一连接内操作有没有变」—— 例如脉冲输出每次
+            Start / Stop 都递增一个操作序号，旧 Stop 的回包晚于新 Start
+            时不能把界面改成 Stopped。会话号只在连接变化时递增，覆盖不了
+            这一层，所以留这个口子。
+
+            注意它只管**回调**和**执行前**的有效性；已经在硬件上跑起来的
+            动作要靠设备自己的 token 去取消，不是这里能拦住的。
         """
         generation, device = self._snapshot()
 
-        def runner():
-            # 执行前校验：排队期间可能已经断开 / 重连 / 关窗
+        def still_ok() -> bool:
             if not self._still_valid(generation, device):
+                return False
+            if still_valid is not None and not still_valid():
+                return False
+            return True
+
+        def runner():
+            # 执行前校验：排队期间可能已经断开 / 重连 / 关窗 / 又按了一次
+            if not still_ok():
                 return _CANCELLED
             return work()
 
         def done(value) -> None:
-            if value is _CANCELLED or not self._still_valid(generation, device):
+            if value is _CANCELLED or not still_ok():
                 if on_stale is not None:
                     on_stale()
                 return
@@ -2638,7 +2655,7 @@ class DeviceTaskSession:
                 on_done(value)
 
         def failed(msg: str) -> None:
-            if not self._still_valid(generation, device):
+            if not still_ok():
                 if on_stale is not None:
                     on_stale()
                 return
