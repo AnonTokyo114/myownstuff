@@ -1304,8 +1304,14 @@ class PulsePanel(QWidget):
         self.counter_edit.setEnabled(connected and not self._running)
 
     def interrupt(self) -> None:
-        # 关窗：会话作废，迟到的回调不再碰控件
+        # 关窗：会话和操作序号**都要**递增。
+        #
+        # 只递增会话号是不够的：Start 的 work 在 dev.start() 返回之后，
+        # 靠 `generation != self._generation` 决定要不要用 stop_if_still(token)
+        # 撤销自己。如果关窗只动会话号，那个条件不成立，于是任务会被创建
+        # 并留在硬件上跑 —— UI 回调虽然被丢弃了，输出却没停。
         self._session += 1
+        self._generation += 1
         self._running = False
         if self._device is not None:
             try:
