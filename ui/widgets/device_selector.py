@@ -429,6 +429,9 @@ class DeviceSelector(QFrame):
         self._kind = kind
         self._device_options = device_options or (lambda: {})
         self._device = None
+        #: 连接请求代次。关闭 / 断开时递增，让在途的 Connect 作废 ——
+        #: 只靠上层页面的任务守卫是不够的：那次连接仍会在后台建好设备。
+        self._connect_request = 0
         self._busy = False
         #: 外部（页面）正在执行耗时操作时置位，锁住连接控件
         self._locked = False
@@ -707,6 +710,9 @@ class DeviceSelector(QFrame):
                  f"{TRANSPORT_LABELS.get(self._conn_kind, self._conn_kind)}")
         self._set_busy(True, f"Connecting to {label}…")
 
+        self._connect_request += 1
+        request = self._connect_request
+
         def work():
             transport = tr_mod.make_transport(self._conn_kind, **params)
             device = spec.factory(transport, **options)
@@ -716,12 +722,21 @@ class DeviceSelector(QFrame):
             return device
 
         def done(device) -> None:
+            if request != self._connect_request:
+                # 连接期间页面已经关了 / 断开了。设备是**真的连上了**，
+                # 不能只丢回调 —— 那会把串口和输出留在后台。
+                self._release_device(device)
+                self.log.emit("Connect finished after the session ended - "
+                              "the device was released.")
+                return
             self._device = device
             self._set_busy(False, "Connected.")
             self._update_controls()
             self.connected.emit(device)
 
         def failed(msg: str) -> None:
+            if request != self._connect_request:
+                return                      # 会话已结束，不再打扰用户
             self._set_busy(False, f"Connect failed: {msg}")
             self._update_controls()
             self.failed.emit(msg)
@@ -756,13 +771,12 @@ class DeviceSelector(QFrame):
     def device(self):
         return self._device
 
-    def force_disconnect(self) -> None:
-        """页面/窗口关闭时兜底：先停住输出，再释放底层设备。
+    @staticmethod
+    def _release_device(device) -> None:
+        """把一台设备按 halt → stop → close 收掉。
 
-        顺序：halt（位移台急停）→ stop（DAQ 归零）→ close（释放资源）。
-        这三个方法都幂等，重复调用无害；单个失败不影响其它步骤。
+        三个方法都幂等，重复调用无害；单个失败不影响其它步骤。
         """
-        device, self._device = self._device, None
         if device is None:
             return
         for name in ("halt", "stop", "close"):
@@ -772,3 +786,15 @@ class DeviceSelector(QFrame):
                     fn()
                 except Exception:                    # noqa: BLE001
                     pass
+
+    def force_disconnect(self) -> None:
+        """页面/窗口关闭时兜底：先停住输出，再释放底层设备。
+
+        **即使当前还没有设备也要作废在途连接** —— Connect 可能正卡在
+        驱动里，等它回来时页面已经关了；那时它仍会建好设备并 emit
+        connected，于是「关掉的窗口又绑上了设备」。已完成的连接由
+        done 里的请求校验负责释放。
+        """
+        self._connect_request += 1
+        device, self._device = self._device, None
+        self._release_device(device)
