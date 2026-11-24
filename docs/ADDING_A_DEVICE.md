@@ -142,6 +142,51 @@ class PowerMeterDevice:
             return float(reply.strip())
         except ValueError as exc:
             raise PowerMeterError(f"bad reply: {reply!r}") from exc
+
+
+class PlaceholderPowerMeter:
+    """无硬件时用的占位驱动。
+
+    方法名和返回值形状必须和真机**一致** —— 下游页面只会调
+    ``read_power()``，不会为「占位还是真机」写分支。
+
+    注意别拿 ``core.devices.PlaceholderDevice`` 顶替：那个模拟的是
+    位移台的位置接口（get_position / set_position），没有 ``read_power``，
+    页面一读就 AttributeError。
+    """
+
+    TRANSPORTS = ("serial", "lan", "gpib", "local")
+
+    def __init__(self, transport, *,
+                 log_callback: Callable[[str], None] | None = None,
+                 **options):
+        self.transport = transport
+        self._log_cb = log_callback
+        self._connected = False
+
+    def _log(self, msg: str) -> None:
+        if self._log_cb is not None:
+            try:
+                self._log_cb(msg)
+            except Exception:                    # noqa: BLE001
+                pass
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def connect(self):
+        self._connected = True
+        self._log("Placeholder powermeter connected (no hardware)")
+        return self
+
+    def close(self) -> None:
+        self._connected = False
+
+    def read_power(self) -> float:
+        if not self._connected:
+            raise PowerMeterError("not connected")
+        return 1.0
 ```
 
 **顺便建议**：如果这台仪器有"危险状态"（激光、高压），把
@@ -162,6 +207,10 @@ def _make_powermeter(transport, **options):
     return pm_mod.PowerMeterDevice(transport, **options)
 
 
+def _make_placeholder_powermeter(transport, **options):
+    return pm_mod.PlaceholderPowerMeter(transport, **options)
+
+
 DEVICES = {
     # ... 已有的 stage / daq / camera ...
     "powermeter": [
@@ -177,7 +226,9 @@ DEVICES = {
             name="Placeholder device",
             transports=("serial", "lan", "gpib"),
             description="No hardware. Lets you try the connect flow.",
-            factory=_make_placeholder,          # 已有的通用占位设备
+            # 必须用**接口一致**的占位驱动：通用的 _make_placeholder
+            # 返回的是位移台占位设备，没有 read_power，页面一读就崩
+            factory=_make_placeholder_powermeter,
         ),
     ],
 }
