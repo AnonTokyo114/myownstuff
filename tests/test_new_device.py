@@ -183,9 +183,7 @@ class TestNothingWrittenOnFailure(unittest.TestCase):
         try:
             page = (ROOT / "ui" / "pages" / f"{kind}_page.py").read_text(
                 encoding="utf-8")
-            # 读设备不能同步跑在槽里
-            self.assertIn("from ui.workers import run_async", page)
-            self.assertIn("run_async(work, done, failed)", page)
+            # 读设备不能同步跑在槽里（现在统一走 DeviceTaskSession）
             # 连接失败要看得见（pythonw 下没有控制台）
             self.assertIn("selector.failed.connect", page)
             # 日志控件来自 LogPane（时间戳/上限/Clear 都在那里统一）
@@ -195,8 +193,16 @@ class TestNothingWrittenOnFailure(unittest.TestCase):
             # 少了这一条，Log 里只有 selector 的进度，没有协议诊断
             self.assertIn("self.log_line.connect(self._append_log)", page)
             self.assertNotIn('print(f"[', page)
-            # 过期回调要作废
-            self.assertIn("_generation", page)
+            # 过期回调交给 DeviceTaskSession 统一校验，页面里不再手写
+            self.assertIn("from ui.workers import DeviceTaskSession", page)
+            self.assertIn("self._tasks = DeviceTaskSession(self)", page)
+            self.assertIn("self._tasks.submit(", page)
+            self.assertIn("self._session", page)
+            # 手写的那套应该已经删干净
+            self.assertNotIn("_generation", page)
+            self.assertNotIn("_bound", page)
+            # DeviceTaskSession 需要 owner.device
+            self.assertIn("def device(self)", page)
             compile(page, "page", "exec")
         finally:
             for name in (f"core/{kind}.py", f"ui/pages/{kind}_page.py",

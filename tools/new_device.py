@@ -239,7 +239,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets import DeviceSelector, LogPane
-from ui.workers import run_async
+from ui.workers import DeviceTaskSession
 
 
 class @CLASS@Page(QWidget):
@@ -249,9 +249,10 @@ class @CLASS@Page(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
-        #: 每次连接/断开都递增，让在途读取的回调失效
-        self._generation = 0
-        self._bound = None
+        #: 连接 / 断开 / 关窗时递增 —— 递增之后在途任务自动作废
+        self._session = 0
+        #: 设备操作的会话守卫：执行前和回调前各校验一次
+        self._tasks = DeviceTaskSession(self)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -311,6 +312,11 @@ class @CLASS@Page(QWidget):
         self.log_line.connect(self._append_log)
 
     # ------------------------------------------------------------------
+    @property
+    def device(self):
+        """当前绑定的设备（DeviceTaskSession 靠它判断会话是否已变）。"""
+        return self.selector.device
+
     def _device_options(self) -> dict:
         return {"log_callback": self.log_line.emit}
 
@@ -323,15 +329,15 @@ class @CLASS@Page(QWidget):
         QMessageBox.critical(self, "Connect failed", msg)
 
     def _on_connected(self, device) -> None:
-        # 设备换了（或重连了）：在途读取的结果不能再落到界面上
-        self._generation += 1
-        self._bound = device
+        # 新会话：上一次连接留下的在途读取到此作废
+        self._session += 1
         self.read_btn.setEnabled(True)
         self.status_label.setText("Connected")
 
     def _on_disconnected(self) -> None:
-        self._generation += 1
-        self._bound = None
+        # 断开后不存在「进行中的读取」：作废在途任务并清掉忙状态，
+        # 否则新连接的第一次读取会被旧 _busy 挡掉
+        self._session += 1
         self._busy = False
         self.read_btn.setEnabled(False)
         self.reading.setText("—")
@@ -348,33 +354,26 @@ class @CLASS@Page(QWidget):
             return
 
         self._busy = True
-        self._generation += 1
-        generation = self._generation
-        bound = dev
         self.read_btn.setEnabled(False)
         self.status_label.setText("Reading…")
 
-        def work():
-            return dev.read_@METHOD@()
-
-        def done(value) -> None:
-            if generation != self._generation or bound is not self._bound:
-                return                       # 已断开 / 重连 / 又读了一次
+        def on_done(value) -> None:
             self._busy = False
             self.read_btn.setEnabled(True)
             self.reading.setText(f"{value:.6g}")
             self.status_label.setText("Connected")
 
-        def failed(msg: str) -> None:
-            if generation != self._generation or bound is not self._bound:
-                return
+        def on_failed(msg: str) -> None:
             self._busy = False
             self.read_btn.setEnabled(True)
             self.status_label.setText(f"Read failed: {msg}")
             self._append_log(f"Read failed: {msg}")
             QMessageBox.critical(self, "Read failed", msg)
 
-        run_async(work, done, failed)
+        # 执行前和回调前都会校验会话：断开 / 重连 / 关窗之后
+        # 旧结果不会写进控件，旧任务也不会再去碰设备
+        self._tasks.submit(lambda: dev.read_@METHOD@(),
+                           on_done=on_done, on_failed=on_failed)
 
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
@@ -382,7 +381,7 @@ class @CLASS@Page(QWidget):
 
         子页面收不到 closeEvent，主窗口靠这个方法收尾。
         """
-        self._generation += 1            # 让在途读取作废
+        self._session += 1               # 让在途读取作废
         try:
             self.selector.force_disconnect()
         except Exception:                        # noqa: BLE001
