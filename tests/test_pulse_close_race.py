@@ -71,6 +71,32 @@ class _FakeNidaqmx:
     DaqError = Exception
 
 
+class _FakeAcquisitionType:
+    """core.nidaq 里 AcquisitionType 是单独 import 的名字。
+
+    patch 'core.nidaq.nidaqmx' **不会**替换它 —— 没有装 nidaqmx 包时它是
+    None，PulseGenerator.start 里 `AcquisitionType.CONTINUOUS` 会直接抛
+    AttributeError。所以这个也必须一起假掉，测试才能在任何机器上自足。
+    """
+
+    CONTINUOUS = "CONTINUOUS"
+    FINITE = "FINITE"
+
+
+def fake_backend():
+    """覆盖整个用例（含预先建立输出的那次 dev.start）。
+
+    只包住第二个 with 块是不够的：情形 B 的前置输出也在 patch 范围之外。
+    """
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch("core.nidaq.nidaqmx", _FakeNidaqmx))
+    stack.enter_context(
+        patch("core.nidaq.AcquisitionType", _FakeAcquisitionType))
+    return stack
+
+
 @unittest.skipIf(QApplication is None, "PySide6 not available")
 class TestLateStartAfterClose(unittest.TestCase):
     @classmethod
@@ -111,14 +137,14 @@ class TestLateStartAfterClose(unittest.TestCase):
 
         try:
             if preexisting_output:
-                with patch("core.nidaq.nidaqmx", _FakeNidaqmx):
+                with fake_backend():
                     dev.start(1000.0, 25.0)
                 panel._running = True
 
             panel.freq_spin.setValue(2000.0)
             panel.duty_spin.setValue(25.0)
 
-            with patch("core.nidaq.nidaqmx", _FakeNidaqmx), \
+            with fake_backend(), \
                  patch.object(dev, "check_params", side_effect=gated_check), \
                  patch("ui.widgets.daq_panels.QMessageBox.critical",
                        return_value=None):
@@ -145,7 +171,7 @@ class TestLateStartAfterClose(unittest.TestCase):
             self.assertIsNone(dev.last_params,
                               "关窗后仍留下了运行参数")
         finally:
-            with patch("core.nidaq.nidaqmx", _FakeNidaqmx):
+            with fake_backend():
                 try:
                     dev.close()
                 except Exception:                    # noqa: BLE001
