@@ -144,8 +144,27 @@ class TestLateStartAfterClose(unittest.TestCase):
             panel.freq_spin.setValue(2000.0)
             panel.duty_spin.setValue(25.0)
 
+            # 用 Event 跟踪**这个 worker 的完成**，而不是观察 dev._task。
+            # 只看 dev._task is None 会在「任务还没创建」时也成立，于是
+            # 断言可能在 worker 还在跑的时候就执行 —— 那是假通过窗口。
+            worker_done = threading.Event()
+            real_run_async = __import__("ui.workers",
+                                        fromlist=["run_async"]).run_async
+
+            def tracked_run_async(fn, on_done, on_error):
+                def finish(call):
+                    def wrapper(arg):
+                        try:
+                            return call(arg)
+                        finally:
+                            worker_done.set()
+                    return wrapper
+
+                return real_run_async(fn, finish(on_done), finish(on_error))
+
             with fake_backend(), \
                  patch.object(dev, "check_params", side_effect=gated_check), \
+                 patch("ui.workers.run_async", tracked_run_async), \
                  patch("ui.widgets.daq_panels.QMessageBox.critical",
                        return_value=None):
                 panel.start()
@@ -157,14 +176,15 @@ class TestLateStartAfterClose(unittest.TestCase):
                 self.assertFalse(panel._running)
 
                 release.set()
+                # 等 worker 的 done/error 真的被调用；期间持续泵 Qt 事件，
+                # 而且**保持 backend patch 有效**
                 deadline = time.time() + 5.0
-                while time.time() < deadline:
+                while not worker_done.is_set() and time.time() < deadline:
                     self.app.processEvents()
-                    if dev._task is None and calls["n"] > 1:
-                        time.sleep(0.2)      # 再给迟到任务一次落地机会
-                        break
-                    time.sleep(0.02)
+                    time.sleep(0.01)
                 self.app.processEvents()
+                self.assertTrue(worker_done.is_set(),
+                                "worker 没有在 5 秒内结束")
 
             self.assertIsNone(dev._task,
                               "关窗后仍留下了脉冲任务")
