@@ -28,6 +28,7 @@ MODULES = [
     ("core/stage.py", "ASI LX-4000 位移台驱动"),
     ("core/nidaq.py", "NI-DAQ 模拟输出（Stage 页面不直接用，但设备注册表引用它）"),
     ("core/devices.py", "设备注册表"),
+    ("ui/version.py", "版本号（侧栏与首页页脚共用）"),
     ("ui/theme.py", "全局样式表（否则危险按钮没有样式）"),
     ("ui/settings.py", "连接参数记忆（settings.ini）"),
     ("ui/workers.py", "后台任务"),

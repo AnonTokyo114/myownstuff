@@ -14,6 +14,7 @@ import logging
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
+from ui.version import SIDEBAR_HINT
 from ui.theme import apply_theme
 from PySide6.QtWidgets import (
     QFrame,
@@ -93,7 +94,7 @@ class MainWindow(QMainWindow):
         self._build_tree()
         side_layout.addWidget(self._tree, 1)
 
-        hint = QLabel("v0.3 · PySide6")
+        hint = QLabel(SIDEBAR_HINT)
         hint.setObjectName("hint")
         side_layout.addWidget(hint)
 

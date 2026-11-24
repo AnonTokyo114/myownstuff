@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ui.version import HOME_FOOTER
 
 
 class NavCard(QFrame):
@@ -94,8 +95,8 @@ class HomePage(QWidget):
 
         cards = [
             ("calculus", "∫", "Calculus",
-             "Definite / indefinite integrals, derivatives and partial derivatives "
-             "— numeric and symbolic, with LaTeX output."),
+             "Definite / indefinite integrals, derivatives, partial derivatives "
+             "and Taylor expansions — numeric and symbolic, with LaTeX output."),
             ("formula", "∑", "Formula Renderer",
              "Turn LaTeX source into a transparent PNG for slides and reports."),
             ("ray", "◇", "Ray Tracer",
@@ -108,9 +109,11 @@ class HomePage(QWidget):
              "Load a CSV/TSV and plot its columns: line, scatter, bar, step or "
              "stem, single or stacked subplots."),
             ("device", "⚙", "Device Interface",
-             "Launch the laboratory instruments — stage, DAQ, camera, laser, "
-             "oscilloscope. Each one opens in its own window and can also run "
-             "standalone from a terminal."),
+             "Launch the laboratory instruments. Stage (ASI LX-4000), filter "
+             "wheel (Thorlabs FW102C) and NI-DAQ (analog outputs, photon "
+             "counting, pulse generator) are implemented; camera, laser and "
+             "oscilloscope are placeholders. Each opens in its own window and "
+             "can also run standalone from a terminal."),
         ]
 
         for index, (key, icon, name, desc) in enumerate(cards):
@@ -121,6 +124,6 @@ class HomePage(QWidget):
         outer.addLayout(grid)
         outer.addStretch(1)
 
-        footer = QLabel("v0.2 · PySide6 · all computation local")
+        footer = QLabel(HOME_FOOTER)
         footer.setObjectName("homeFooter")
         outer.addWidget(footer)

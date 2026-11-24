@@ -182,7 +182,7 @@ serial\baudrate=115200
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-`tests/` 里是历次代码审查确认过的缺陷的回归用例（38 个），覆盖：
+`tests/` 里是历次代码审查确认过的缺陷的回归用例（227 个），覆盖：
 
 | 文件 | 覆盖 |
 |---|---|
