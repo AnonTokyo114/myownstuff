@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from PySide6.QtCore import Signal
@@ -35,6 +36,9 @@ from core import devices as dev_mod
 from core import transport as tr_mod
 from ui.settings import settings
 from ui.workers import run_async
+
+#: 模块级 logger：对象销毁后仍要能记录收尾过程
+log = logging.getLogger("device_selector")
 
 #: 连接方式 -> 显示名
 TRANSPORT_LABELS = {
@@ -726,8 +730,11 @@ class DeviceSelector(QFrame):
                 # 连接期间页面已经关了 / 断开了。设备是**真的连上了**，
                 # 不能只丢回调 —— 那会把串口和输出留在后台。
                 self._release_device(device)
-                self.log.emit("Connect finished after the session ended - "
-                              "the device was released.")
+                # 这里**不能**用 self.log.emit：selector 可能已经被
+                # deleteLater 销毁，碰 Qt 信号会抛
+                # RuntimeError: Signal source has been deleted
+                log.info("Connect finished after the session ended - "
+                         "the device was released.")
                 return
             self._device = device
             self._set_busy(False, "Connected.")

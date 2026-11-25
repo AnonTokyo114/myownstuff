@@ -27,7 +27,10 @@ class NavCard(QFrame):
         self._key = key
         self.setObjectName("navCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(104)
+        # 用最小高度而不是固定高度：窄窗口里说明可能换到 4~5 行，
+        # 固定 104 会把文字压扁（实测 1024 宽时 Device 那条需要 98px，
+        # 只给到 59px）。QGridLayout 会让同一行的卡片取相同高度。
+        self.setMinimumHeight(104)
         self.setMinimumWidth(200)
 
         layout = QVBoxLayout(self)

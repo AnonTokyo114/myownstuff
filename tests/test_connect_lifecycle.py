@@ -7,11 +7,13 @@
   * 没有 emit connected
 """
 
+import io
 import os
 import sys
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 ROOT = r"C:\myownstuff"
@@ -25,10 +27,11 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 class SlowDevice:
-    """connect() 会卡住，直到测试放行。"""
+    """connect() 会卡住，直到测试放行；可以指定放行后抛异常。"""
 
-    def __init__(self, gate):
+    def __init__(self, gate, *, fail_with=None):
         self._gate = gate
+        self._fail_with = fail_with
         self.connect_called = threading.Event()
         self.released = []
         self.connected = False
@@ -36,6 +39,9 @@ class SlowDevice:
     def connect(self):
         self.connect_called.set()
         self._gate.wait(10.0)
+        if self._fail_with is not None:
+            # 真正的连接失败：走 _on_connect 的 failed 分支
+            raise RuntimeError(self._fail_with)
         self.connected = True
         return self
 
@@ -55,11 +61,11 @@ class TestConnectLifecycle(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def _make_selector(self, gate):
+    def _make_selector(self, gate, *, fail_with=None):
         from core.devices import DeviceSpec
         from ui.widgets.device_selector import DeviceSelector
 
-        device = SlowDevice(gate)
+        device = SlowDevice(gate, fail_with=fail_with)
         spec = DeviceSpec(
             key="slow_probe",
             name="Slow Probe",
@@ -130,18 +136,64 @@ class TestConnectLifecycle(unittest.TestCase):
         self.assertIsNone(selector.device)
         self.assertIn("close", device.released)
 
-    def test_late_connect_failure_is_silent(self):
-        """关窗之后才失败的连接，不该再弹错给用户。"""
+    def test_late_connect_after_selector_destroyed(self):
+        """selector 被销毁之后，迟到完成的连接不能再碰 Qt 对象。
+
+        force_disconnect 已经把请求作废、设备也会被释放，但 done() 仍在
+        主线程被调用。那时如果去 emit Qt 信号，会抛
+        RuntimeError: Signal source has been deleted —— 设备收尾反而
+        被这个异常打断。这里先真正销毁 selector，再看有没有该异常。
+        """
         gate = threading.Event()
-        selector, _device = self._make_selector(gate)
+        selector, device = self._make_selector(gate)
+        selector._on_connect()
+        self.assertTrue(device.connect_called.wait(5.0),
+                        "connect() 没有被调用")
+
+        selector.force_disconnect()
+        selector.deleteLater()
+        # 投递 DeferredDelete，让 C++ 对象真的销毁
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(
+            None, QEvent.Type.DeferredDelete.value)
+
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            gate.set()
+            self._pump(4.0, lambda: "close" in device.released)
+            self.app.processEvents()
+
+        err = captured.getvalue()
+        self.assertIn("close", device.released,
+                      f"设备没有被释放：{device.released}")
+        self.assertNotIn("Signal source has been deleted", err,
+                         f"销毁后仍在碰 Qt 信号：{err[-300:]}")
+        self.assertNotIn("RuntimeError", err, f"有未捕获异常：{err[-300:]}")
+
+    def test_late_connect_failure_is_silent(self):
+        """关窗之后才**失败**的连接，不该再弹错给用户。
+
+        这里必须真的抛异常 —— 如果 connect() 只是正常返回，走的还是成功
+        分支，这条测试就保护不了 failed 里的请求校验。
+        """
+        gate = threading.Event()
+        selector, device = self._make_selector(
+            gate, fail_with="review: delayed refusal")
         failures = []
         selector.failed.connect(lambda m: failures.append(m))
 
         selector._on_connect()
-        self._pump(3.0, lambda: selector._busy)
+        self.assertTrue(device.connect_called.wait(5.0),
+                        "connect() 没有被调用")
+
+        # 等 worker 真的进入 connect 之后再关窗
         selector.force_disconnect()
+        self.assertIsNone(selector.device)
+
         gate.set()
-        self._pump(2.0)
+        # 等这次 worker 结束：busy 标志在迟到分支里不会被动，
+        # 所以用「failed 是否发出」和超时共同判定
+        self._pump(6.0, lambda: len(failures) > 0)
         self.assertEqual(failures, [],
                          f"迟到失败仍然打扰了用户：{failures}")
 
