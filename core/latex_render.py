@@ -154,13 +154,6 @@ def _render_latex_uncached(s: str, *, fontsize=16, dpi=180, color="black"):
                 plt.close(fig)
             except Exception:
                 pass
-
-
-def latex_to_display(latex):
-    """给界面显示用的 LaTeX 源码（去掉多余包装，方便复制）。"""
-    return strip_delimiters(latex)
-
-
 #: 常见可用语法示例，供界面做"支持哪些写法"的说明
 EXAMPLES = [
     (r"x^{2} + 2x + 1", "多项式"),

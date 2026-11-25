@@ -30,7 +30,6 @@ import threading
 from typing import Callable
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QSettings
@@ -3564,7 +3563,6 @@ class DeviceSelector(QFrame):
 # ====================================================================
 #  Stage Controller 页面   （源：ui/pages/stage_page.py）
 # ====================================================================
-import sys
 import time
 
 from PySide6.QtCore import Signal

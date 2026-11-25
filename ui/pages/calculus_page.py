@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -1010,7 +1009,3 @@ class CalculusPage(QWidget):
 
         outer.addWidget(scroll, 1)
         self._tabs = tabs
-
-
-def _noop() -> None:
-    return None

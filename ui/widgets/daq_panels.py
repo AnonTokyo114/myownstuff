@@ -11,7 +11,6 @@ DC 输出都有自己的一份状态**（横幅、安全确认、未知状态提
 from __future__ import annotations
 
 import csv
-import statistics
 import time
 from collections import deque
 from datetime import datetime
@@ -19,7 +18,6 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -29,10 +27,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -55,7 +51,6 @@ class AnalogChannelPanel(QFrame):
     """一路模拟输出：通道名、电压、滑块、应用/停止、状态与安全横幅。"""
 
     log_line = Signal(str)
-    busy_changed = Signal(bool)
 
     def __init__(self, title: str, default_channel: str,
                  parent: QWidget | None = None) -> None:
@@ -155,11 +150,6 @@ class AnalogChannelPanel(QFrame):
         self._update_controls()
         self._update_status()
         self._update_banner()
-
-    def set_busy(self, busy: bool) -> None:
-        self._busy = busy
-        self._update_controls()
-
     # ------------------------------------------------------------------
     def _on_slider_changed(self, raw: int) -> None:
         self.volt_spin.blockSignals(True)
@@ -369,7 +359,6 @@ class AnalogChannelPanel(QFrame):
         if message:
             self.log_line.emit(message)
         self._update_controls()
-        self.busy_changed.emit(busy)
 
     def _update_controls(self) -> None:
         connected = self._device is not None
@@ -453,7 +442,6 @@ class PhotonPanel(QWidget):
     """SPCM TTL 计数：轮询累计数、差分出计数率、实时曲线、导出 CSV。"""
 
     log_line = Signal(str)
-    busy_changed = Signal(bool)
 
     DEFAULT_BIN = 1.0
     DEFAULT_WINDOW = 60.0
@@ -651,10 +639,6 @@ class PhotonPanel(QWidget):
             self._timer.stop()
         self._update_controls()
         self._update_status()
-
-    def set_busy(self, busy: bool) -> None:
-        self._update_controls()
-
     # ------------------------------------------------------------------
     @property
     def device(self):
@@ -737,7 +721,6 @@ class PhotonPanel(QWidget):
             self._update_controls()
 
         self.status_label.setText("Starting counter…")
-        self.busy_changed.emit(True)
         run_async(work, done, failed)
 
     def _flush_repaint(self) -> None:
@@ -1067,7 +1050,6 @@ class PulsePanel(QWidget):
     """计数器脉冲串：频率 + 占空比，连续输出。"""
 
     log_line = Signal(str)
-    busy_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1168,10 +1150,6 @@ class PulsePanel(QWidget):
             self._running = False
         self._update_controls()
         self._update_status()
-
-    def set_busy(self, busy: bool) -> None:
-        self._update_controls()
-
     # ------------------------------------------------------------------
     @property
     def device(self):
@@ -1233,7 +1211,6 @@ class PulsePanel(QWidget):
 
         self.status_label.setText(
             f"Starting pulse train: {freq:g} Hz, {duty:g} %…")
-        self.busy_changed.emit(True)
         # still_valid 是第二层：同一连接内又按了一次 Start/Stop 就作废。
         # 会话层（断开/重连）由 DeviceTaskSession 自己管。
         self._tasks.submit(
@@ -1276,7 +1253,6 @@ class PulsePanel(QWidget):
             self.log_line.emit(f"Pulse stop failed: {msg}")
             self._update_controls()
 
-        self.busy_changed.emit(True)
         self._tasks.submit(
             work, on_done=done, on_failed=failed,
             still_valid=lambda: generation == self._generation)

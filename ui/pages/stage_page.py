@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 
 from PySide6.QtCore import Signal

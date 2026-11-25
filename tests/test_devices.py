@@ -28,7 +28,6 @@ from core.nidaq import (  # noqa: E402
     PlaceholderDaq,
     PlaceholderPhotonCounter,
     PlaceholderPulseGenerator,
-    PulseGenerator,
     StopResult,
 )
 from core.stage import ASIHalted, ASI_lx_4000  # noqa: E402

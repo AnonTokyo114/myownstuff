@@ -35,17 +35,18 @@ from PySide6.QtWidgets import (
 #:   "ui.pages.placeholder_page:create_device_subpage:stage"  带参数的工厂
 #: 子项列表目前都为空：设备不再是内嵌子页，而是由 Device Interface
 #: 页面启动的独立 GUI（见 devicegui/）。
+#: (key, 标题, 图标, "模块:类") —— 全部是平级页面，没有子菜单。
 PAGES = [
-    ("home", "Home", "🏠", "ui.pages.home_page:HomePage", []),
-    ("calculus", "Calculus", "∫", "ui.pages.calculus_page:CalculusPage", []),
-    ("formula", "Formula Renderer", "∑", "ui.pages.formula_page:FormulaPage", []),
-    ("ray", "Ray Tracer", "◇", "ui.pages.ray_page:RayPage", []),
+    ("home", "Home", "🏠", "ui.pages.home_page:HomePage"),
+    ("calculus", "Calculus", "∫", "ui.pages.calculus_page:CalculusPage"),
+    ("formula", "Formula Renderer", "∑", "ui.pages.formula_page:FormulaPage"),
+    ("ray", "Ray Tracer", "◇", "ui.pages.ray_page:RayPage"),
     ("matrix", "Matrix Calculator", "▦",
-     "ui.pages.matrix_page:MatrixCalculatorPage", []),
-    ("plotter", "Plotter", "📈", "ui.pages.plotter_page:PlotterPage", []),
+     "ui.pages.matrix_page:MatrixCalculatorPage"),
+    ("plotter", "Plotter", "📈", "ui.pages.plotter_page:PlotterPage"),
     # 设备不再是内嵌子页：这里只是分类入口，点 Launch 会启动独立的设备 GUI
     ("device", "Device Interface", "⚙",
-     "ui.pages.device_hub_page:DeviceHubPage", []),
+     "ui.pages.device_hub_page:DeviceHubPage"),
 ]
 
 
@@ -112,9 +113,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 导航
     def _build_tree(self) -> None:
-        for key, title, icon, spec, children in PAGES:
-            # 不要在这里补前导空格：缩进完全交给 QTreeWidget 的 indentation，
-            # 否则父子项左边缘会几乎对齐，看不出层级。
+        for key, title, icon, spec in PAGES:
             item = QTreeWidgetItem([f"{icon}   {title}"])
             item.setData(0, Qt.ItemDataRole.UserRole, key)
             item.setSizeHint(0, QSize(0, 36))
@@ -123,27 +122,13 @@ class MainWindow(QMainWindow):
             self._specs[key] = spec
             self._titles[key] = title
 
-            for ckey, ctitle, cicon, cspec, _ in children:
-                child = QTreeWidgetItem([f"{cicon}  {ctitle}"])
-                child.setData(0, Qt.ItemDataRole.UserRole, ckey)
-                child.setSizeHint(0, QSize(0, 30))
-                item.addChild(child)
-                self._items[ckey] = child
-                self._specs[ckey] = cspec
-                self._titles[ckey] = ctitle
-
-            if children:
-                item.setExpanded(True)
-
     def _ensure_page(self, key: str) -> QWidget:
         if key in self._pages:
             return self._pages[key]
 
-        spec = self._specs[key]
-        parts = spec.split(":")
-        module = importlib.import_module(parts[0])
-        factory = getattr(module, parts[1])
-        page = factory(*parts[2:]) if len(parts) > 2 else factory()
+        module_name, _, class_name = self._specs[key].partition(":")
+        module = importlib.import_module(module_name)
+        page = getattr(module, class_name)()
 
         # 首页的卡片点击 -> 切换导航
         navigate = getattr(page, "navigate", None)
@@ -170,13 +155,6 @@ class MainWindow(QMainWindow):
         page = self._ensure_page(key)
         self._stack.setCurrentWidget(page)
         self._status.showMessage(f"Current: {self._titles.get(key, key)}")
-
-        hook = getattr(page, "on_activated", None)
-        if callable(hook):
-            try:
-                hook()
-            except Exception as exc:                 # 钩子失败不该拖垮导航
-                self._status.showMessage(f"Page initialization error: {exc}")
 
     # ------------------------------------------------------------------ 退出
     def closeEvent(self, event) -> None:      # noqa: N802

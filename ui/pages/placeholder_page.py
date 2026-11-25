@@ -82,38 +82,6 @@ class PlaceholderPage(QWidget):
                 outer.addWidget(card)
 
         outer.addStretch(1)
-
-
-# ======================================================================
-# Device Interface
-# ======================================================================
-def create_device_page() -> PlaceholderPage:
-    """Device Interface 的总览页（点父节点时显示）。"""
-    return PlaceholderPage(
-        page_title="Device Interface",
-        subtitle=("Instrument control, grouped by device class. Pick a "
-                  "sub-entry in the left menu."),
-        note_title="All sub-sections are placeholders",
-        note=("The menu structure is in place. Tell me the actual instruments "
-              "for a given category (model, connection type, commands you "
-              "send) and I will build that page for real."),
-        planned=[
-            ("Stage Controller",
-             "Translation / rotation stages: move to position, jog, home, limits."),
-            ("Camera",
-             "Image acquisition: exposure, gain, live preview, snapshot."),
-            ("Laser",
-             "Source control: on/off, power or current setpoint, temperature readback."),
-            ("Oscilloscope",
-             "Waveform capture: timebase, range, trigger, save trace."),
-            ("Data Acquisition",
-             "Multi-channel voltage / sensor logging with live plotting."),
-            ("Others",
-             "Anything that does not fit the categories above."),
-        ],
-    )
-
-
 #: 每个 device 子分类：(标题, 一句话说明, 计划能力列表)
 DEVICE_SECTIONS = {
     "stage": (

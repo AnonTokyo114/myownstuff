@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
 import unittest
 from unittest.mock import patch

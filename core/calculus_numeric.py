@@ -122,28 +122,6 @@ def _realify(z, tol=1e-12):
     if abs(z.imag) <= tol * max(1.0, abs(z)):
         return z.real
     return z
-
-
-def _is_meaningfully_complex(f, lower, upper):
-    """探测被积函数是否真有虚部（避免对实函数白跑两遍）。
-
-    注意：scipy 的 quad 对复值函数会**静默丢弃虚部**，所以必须先判断，
-    再决定是否分实虚部积分。
-    """
-    lo = lower if np.isfinite(lower) else 1.0
-    hi = upper if np.isfinite(upper) else 2.0
-    if not (np.isfinite(lo) and np.isfinite(hi)) or lo >= hi:
-        lo, hi = 0.0, 1.0
-    for t in np.linspace(lo, hi, 5):
-        try:
-            v = _as_complex(f(float(t)))
-        except Exception:
-            continue
-        if abs(v.imag) > 1e-12 * max(1.0, abs(v)):
-            return True
-    return False
-
-
 def _looks_divergent(f, lower, upper):
     """粗判有限端点处是否**真的**发散。
 
@@ -286,22 +264,6 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
     if not np.isfinite(abs(rich)):
         raise CalculusError("Derivative is invalid (not differentiable here, or the function diverges)")
     return _realify(rich), float(abs(err))
-
-
-def derivative_curve(expr, xs, order=1, x_name="x"):
-    """在给定点集上算导数，用于画导函数曲线。"""
-    compiled = CompiledExpression(expr, variables=[x_name])
-    base = (compiled.function(x_name) if compiled.variables
-            else (lambda _x: compiled.evaluate()))
-    out = []
-    for x in xs:
-        try:
-            out.append(derivative(expr, float(x), order=order, x_name=x_name)[0])
-        except Exception:
-            out.append(np.nan)
-    return np.array(out, dtype=float)
-
-
 # ---------------------------------------------------------------- 偏导
 
 def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
@@ -368,28 +330,3 @@ def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
 
 
 # ---------------------------------------------------------------- 辅助
-
-def find_singularities(expr, lower, upper, x_name="x", samples=400):
-    """粗略探测区间内的可疑点（函数值突变/变为非有限）——用于解释积分困难。"""
-    compiled = CompiledExpression(expr, variables=[x_name])
-    base = (compiled.function(x_name) if compiled.variables
-            else (lambda _x: compiled.evaluate()))
-    if not (np.isfinite(lower) and np.isfinite(upper)) or lower >= upper:
-        return []
-    xs = np.linspace(lower, upper, samples)
-    suspects = []
-    prev = None
-    for x in xs:
-        try:
-            v = float(base(float(x)))
-        except Exception:
-            suspects.append(float(x))
-            prev = None
-            continue
-        if not np.isfinite(v):
-            suspects.append(float(x))
-        elif prev is not None and abs(v) > 1e12 and abs(v) > abs(prev) * 100:
-            suspects.append(float(x))
-        prev = v
-    # 采样点代表区间，去重并只保留有限区间内的
-    return sorted(set(round(s, 6) for s in suspects))[:10]
