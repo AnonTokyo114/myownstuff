@@ -4136,8 +4136,9 @@ def main() -> int:
     os.environ.setdefault("QT_API", "pyside6")
 
     # 单文件只有 Stage 页面，它不画图，所以这里**不导入 matplotlib**：
-    # 省掉约 940 ms 的导入时间，也让「只装 PySide6 + pyserial」的
-    # 最小安装能直接跑起来。
+    # 省掉一次完整库导入，也让「只装 PySide6 + pyserial」的最小安装能直接跑。
+    # （导入 matplotlib 的实际开销随机器和缓存差别很大，不要在这里写死数字；
+    #   用 tools/bench_startup.py --single-file 在本机测。）
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
