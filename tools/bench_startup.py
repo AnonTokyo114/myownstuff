@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -152,39 +154,94 @@ def _measure(child_code: str, name: str, runs: int,
     cmd = [PY, str(child_path)] + (extra_args or [])
 
     def once() -> tuple[float | None, bool]:
-        """返回 (到 READY 的秒数, 是否加载 matplotlib)；没 READY 则 None。"""
+        """返回 (到 READY 的秒数, 是否加载 matplotlib)；没 READY 则 None。
+
+        两个管道各起一个读取线程，父进程只从 Queue 取：
+          * ``Queue.get(timeout=剩余时间)`` 是真正可中断的 —— 直接
+            ``readline()`` 会一直阻塞到有换行，期限检查形同虚设
+          * stderr 也必须排空：子进程写满管道后会卡在写端，连 READY
+            都发不出来
+        """
         t0 = time.perf_counter()
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=env,
         )
+
+        lines: queue.Queue = queue.Queue()
+
+        def pump(stream, tag: str) -> None:
+            try:
+                for raw in stream:
+                    lines.put((tag, raw))
+            except Exception:                        # noqa: BLE001
+                pass
+            finally:
+                lines.put((tag, None))               # EOF 标记
+
+        readers = [
+            threading.Thread(target=pump, args=(proc.stdout, "out"),
+                             daemon=True),
+            threading.Thread(target=pump, args=(proc.stderr, "err"),
+                             daemon=True),
+        ]
+        for t in readers:
+            t.start()
+
         deadline = t0 + READY_TIMEOUT
         elapsed = None
         mpl = False
+        stderr_tail: list[str] = []
+
         try:
             while True:
-                if time.perf_counter() > deadline:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break                                # 超时：不收录
+                try:
+                    tag, line = lines.get(timeout=remaining)
+                except queue.Empty:
                     break
-                line = proc.stdout.readline()
-                if not line:
-                    break
+                if line is None:
+                    if tag == "out":
+                        break                            # stdout 关了也没 READY
+                    continue
+                if tag == "err":
+                    stderr_tail.append(line)
+                    del stderr_tail[:-20]                # 只留尾巴，别无限涨
+                    continue
                 if line.startswith("MATPLOTLIB"):
                     mpl = line.split()[-1] == "1"
                 elif line.strip() == "READY":
-                    elapsed = time.perf_counter() - t0
+                    now = time.perf_counter()
+                    if now > deadline:
+                        break                        # 迟到的 READY 不算数
+                    elapsed = now - t0
                     break
         finally:
-            # 停表之后才等它清理；退出码也要看
+            # 超时（没拿到 READY）就别再等它自己退 —— 直接杀，否则一个
+            # sleep(30) 的子进程会把整个测量拖上 30 秒。
+            if elapsed is None:
+                proc.kill()
+            # 正常路径：停表之后再等它清理，退出码也要看
             try:
-                proc.wait(timeout=60)
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=10)
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
+                proc.wait(timeout=5)
+            for t in readers:
+                t.join(timeout=5)
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except Exception:                    # noqa: BLE001
+                    pass
+
         ok = proc.returncode == 0 and elapsed is not None
+        if not ok and stderr_tail:
+            # 失败时把子进程的错误尾巴带出来，别让测量静默失败
+            print("    " + "".join(stderr_tail[-3:]).strip()[:300])
         return (elapsed if ok else None), mpl
 
     try:
