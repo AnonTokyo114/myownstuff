@@ -136,22 +136,32 @@ def create_device_window(kind: str):
     return create_device_subpage(kind)
 
 
+#: 这些设备窗口会画图，启动时必须先配好 matplotlib 后端。
+#: 其余的（stage / filterwheel / camera / laser / scope / others）不画图，
+#: 导入 matplotlib 纯粹是浪费 —— 它占启动时间里相当一块。
+#:
+#: 注意 DAQ **要**画：光子计数的实时曲线用 matplotlib。
+DRAWS_PLOTS = {"daq"}
+
+
 def run_device_app(kind: str) -> int:
     """独立运行一个设备 GUI 的入口。
 
     必须在这里锁定 QT_API —— 与 main.py 同样的理由：本机同时装了
-    PyQt5 和 PySide6，不锁会撞到 access violation。
+    PyQt5 和 PySide6，不锁会撞到 access violation。**这一步必须在任何
+    Qt / matplotlib 导入之前**。
 
-    matplotlib 是**可选**的：stage / DAQ 这类设备页面根本不画图，
-    强制依赖它会让「只装 PySide6 + pyserial」的最小安装跑不起来。
+    matplotlib 只有真正画图的设备才导入：没装它时 stage / filterwheel
+    这类窗口照常启动（「只装 PySide6 + pyserial」的最小安装也能用）。
     """
     os.environ.setdefault("QT_API", "pyside6")
 
-    try:
-        import matplotlib
-        matplotlib.use("QtAgg")
-    except ImportError:
-        pass          # 不画图的设备照常启动
+    if kind in DRAWS_PLOTS:
+        try:
+            import matplotlib
+            matplotlib.use("QtAgg")
+        except ImportError:
+            pass          # 没装 matplotlib：曲线画不出来，但窗口还能开
 
     # 保证从任意工作目录启动都能 import core / ui
     if str(ROOT) not in sys.path:
