@@ -87,13 +87,12 @@ FOOTER = '''
 #  入口
 # ======================================================================
 def main() -> int:
+    # 必须在任何 Qt 导入之前 —— 本机同时装了 PyQt5 和 PySide6
     os.environ.setdefault("QT_API", "pyside6")
 
-    try:
-        import matplotlib
-        matplotlib.use("QtAgg")
-    except ImportError:
-        pass
+    # 单文件只有 Stage 页面，它不画图，所以这里**不导入 matplotlib**：
+    # 省掉约 940 ms 的导入时间，也让「只装 PySide6 + pyserial」的
+    # 最小安装能直接跑起来。
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
