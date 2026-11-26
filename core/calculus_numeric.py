@@ -257,13 +257,61 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
     if order == 1:
         rich = (4 * d2 - d1) / 3
         err = abs(d3 - d2)
+        # 中心差分看不出折点（|x| 在 0 恒为 0），补一次单侧差商检查
+        _kink_check(f, x0, h0 / 4, rich)
     else:
         # 二阶差分误差是 O(h^2)，外推系数同为一阶
         rich = (4 * d2 - d1) / 3
         err = abs(d3 - d2)
+        # 二阶导存在的前提是一阶导存在：对**一阶**中心差分做折点检查。
+        # |x| 在 0 的二阶差分本身会给出 2/h 这种巨大值，不是 0，
+        # 所以不能直接拿 rich 去套一阶的判据。
+        # 注意不能写 estimate(h0/4)：order==2 时它返回的是**二阶**差分，
+        # 而这里要的是「一阶导存不存在」
+        first_central, _second = _central_diff(f, x0, h0 / 4)
+        _kink_check(f, x0, h0 / 4, first_central)
     if not np.isfinite(abs(rich)):
         raise CalculusError("Derivative is invalid (not differentiable here, or the function diverges)")
     return _realify(rich), float(abs(err))
+def _one_sided(f, x0, step, sign):
+    """单侧差商：sign=+1 取右侧（前向），-1 取左侧（后向）。"""
+    if sign > 0:
+        return (f(x0 + step) - f(x0)) / step
+    return (f(x0) - f(x0 - step)) / step
+
+
+def _kink_check(f, x0, step, symmetric_value, *, atol=1e-9, rtol=1e-2):
+    """中心差分说「导数≈0」，但两侧差商明显不一致时，判为不可导。
+
+    为什么需要这一步：对称中心差分对折点**恒为零**。``|x|`` 在 0 处
+    ``f(+h) - f(-h)`` 永远是 0，Richardson 外推也只会得到 0 和零误差，
+    于是界面显示「导数 0，误差 0」—— 而真实情况是左右导数分别为 -1、+1，
+    导数不存在。
+
+    判据故意保守：只在**中心差分为零**且**两侧差商相差很大**时才拒绝。
+    这样
+      * ``|x|`` 在 0   -> 触发（两侧 -1 / +1）
+      * ``x**2`` 在 0  -> 不触发（两侧差商都是 O(h)，差值 ~h）
+      * ``exp(100x)``  -> 不触发（中心差分不是 0）
+    可导但导数振荡的函数不会因为「导数不连续」被误拒。
+    """
+    try:
+        left = _one_sided(f, x0, step, -1)
+        right = _one_sided(f, x0, step, +1)
+    except Exception:                            # noqa: BLE001
+        return                                       # 取不到就差商就不再判断
+
+    reference = max(1.0, abs(symmetric_value), abs(left), abs(right))
+    if (abs(symmetric_value) < atol * reference
+            and abs(left - right) > rtol * reference):
+        raise CalculusError(
+            "Not differentiable at this point: the one-sided difference "
+            f"quotients disagree ({left:+.6g} from the left, "
+            f"{right:+.6g} from the right) while the symmetric difference "
+            "is zero. A symmetric difference is an average of the two "
+            "sides, not a derivative.")
+
+
 # ---------------------------------------------------------------- 偏导
 
 def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
@@ -295,6 +343,9 @@ def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
 
         d1, d2 = val(h), val(h / 2)
         rich = (4 * d2 - d1) / 3
+        # 同一族问题：abs(x)+y 在原点的偏导也是对称差分的零点
+        _kink_check(lambda t, _v=var, _p=point: f(**{**{_v: t}}), 
+                    point[var], h / 4, rich)
         return _realify(rich), float(abs(val(h / 4) - d2))
 
     if order == 2 and cross_var is None:

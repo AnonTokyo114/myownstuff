@@ -489,16 +489,29 @@ def focal_properties(surfaces, z):
         raise ValueError('No optical power (C = 0): a plane-parallel plate or an empty system has no focal length.')
     n_in = surfaces[0].n
     n_out = surfaces[-2].n
-    efl = -1.0 / C
+
+    # 物方/像方焦距**不相等**（除非 n_in == n_out）：
+    #   f_front = -n_in / C,   f_back = -n_out / C
+    # 主平面要拿各自那边的焦距算，不能都用 -1/C：
+    #   h_front = f_front - ffl = n_in * (D - 1) / C
+    #   h_back  = bfl - f_back = n_out * (1 - A) / C
+    #
+    # 单球面 n_in=1, n_out=1.5, R=50 的例子能验出来：A=D=1, C=-0.01，
+    # 两主平面都该在顶点（0），旧写法给出 h_back=50。
+    # 全空气系统里 n_in == n_out == 1，两种写法重合，所以默认案例看不出来。
+    f_front = -n_in / C
+    f_back = -n_out / C
     bfl = -A * n_out / C
     ffl = -D * n_in / C
     return {
         'matrix': M,
-        'efl': efl,
+        'efl': -1.0 / C,            # 约化焦距（= 单位折射率下的焦距）
+        'f_front': f_front,
+        'f_back': f_back,
         'bfl': bfl,
         'ffl': ffl,
-        'h_front': efl - ffl,
-        'h_back': bfl - efl,
+        'h_front': f_front - ffl,
+        'h_back': bfl - f_back,
         'n_in': n_in,
         'n_out': n_out,
         'power': C * -1.0,          # 光焦度 1/EFL 的等价量，仅供显示
