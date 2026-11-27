@@ -492,5 +492,69 @@ class TestInvalidSamplingArguments(unittest.TestCase):
             self.fail("n_scan=0 should raise")
 
 
+class TestExplicitSingleSampleFocus(unittest.TestCase):
+    """显式请求一条光线时，对焦必须说"信息不足"。
+
+    单光线 / RMS 平坦这两条检查原来嵌在 `if full < n_pupil` 里，
+    而 n_pupil=1 时 full == n_pupil，那个分支根本不进 —— 于是跳过检查，
+    把扫描下界 22 mm 当成焦面返回（RMS=0）。
+
+    不过 spot_analysis(n_pupil=1) 本身是合理的（单光线追迹），
+    只有对焦需要更多采样来看到光斑涨落。
+    """
+
+    @staticmethod
+    def _defaults():
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces = []
+        for name, R, t, n, semi in DEFAULTS:
+            surfaces.append(o.Surface(
+                name,
+                float("inf") if R in ("inf", "") else float(R),
+                float(t), float(n),
+                None if semi in ("", None) else float(semi)))
+        z, acc = [], 0.0
+        for surf in surfaces:
+            z.append(acc)
+            acc += surf.t
+        return surfaces, z
+
+    def test_single_sample_focus_is_refused(self):
+        """无裁光、显式 n_pupil=1：RMS 恒 0，不能给焦面。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        with self.assertRaises(ValueError) as ctx:
+            o.best_focus(surfaces, z, field_deg=0.0, n_pupil=1)
+        message = str(ctx.exception)
+        self.assertIn("one ray", message.lower())
+        self.assertIn("spacing", message.lower())
+
+    def test_single_sample_spot_analysis_still_works(self):
+        """spot_analysis(n_pupil=1) 仍然可用 —— 单光线追迹是合理需求。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=1,
+                               image_gap=38.925)
+        self.assertEqual(prof["n_reached"], 1)
+        self.assertAlmostEqual(prof["chief"], 0.0, places=12)
+
+    def test_two_samples_can_locate_a_focus(self):
+        """两条采样就有涨落信息，应该能给焦面。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        result = o.best_focus(surfaces, z, field_deg=0.0, n_pupil=2)
+        self.assertGreaterEqual(result["n_reached"], 2)
+        self.assertNotEqual(result["best_rms"], 0.0)
+
+    def test_default_still_finds_the_focus(self):
+        """默认 9 条采样不受影响。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        result = o.best_focus(surfaces, z, field_deg=0.0, n_pupil=9)
+        self.assertEqual(result["n_reached"], 9)
+        self.assertAlmostEqual(result["best_gap"], 38.925, delta=0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

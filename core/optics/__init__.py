@@ -717,18 +717,24 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
                 f'kept {full}. The surviving rays differ between spacings, '
                 f'so an RMS comparison would be against different bundles. '
                 f'Widen the image-plane aperture or the gap range.')
-        if full <= 1:
-            raise ValueError(
-                'Only one ray reaches the image at every spacing, and it '
-                'sits on the axis, so its RMS is zero everywhere and the '
-                'focus cannot be located. Widen the image-plane aperture.')
-        spread = max(item[1] for item in pool if item[2] == full) - \
-            min(item[1] for item in pool if item[2] == full)
-        if spread <= 1e-15:
-            raise ValueError(
-                'The RMS is flat across the whole scan range, so no useful '
-                'focus can be identified. Narrow gap_range around the '
-                'expected focus.')
+
+    # 下面两条与"有没有裁光"无关，所以放在分支外。
+    # 显式请求 n_pupil=1 时 full == n_pupil，上面那个分支根本不进，
+    # 但那条轴上光线在所有像距上都在 y=0，RMS 恒为 0 —— 扫描下界
+    # 会被当成"最佳焦面"。信息不足就该直说，而不是返回一个确定的值。
+    if full <= 1:
+        raise ValueError(
+            'Only one ray reaches the image, and it sits on the axis, so '
+            'its RMS is zero at every spacing and the focus cannot be '
+            'located. Sample the pupil with more than one ray (best_focus '
+            'needs several to see a spot grow and shrink).')
+    spread = max(item[1] for item in pool if item[2] == full) - \
+        min(item[1] for item in pool if item[2] == full)
+    if spread <= 1e-15:
+        raise ValueError(
+            'The RMS is flat across the whole scan range, so no useful '
+            'focus can be identified. Narrow gap_range around the '
+            'expected focus.')
 
     curve = [(gap, rms) for gap, rms, _n, _g in coarse]
     return {
