@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from core.calculus_symbolic import SymbolicError, taylor_poly  # noqa: E402
 from core.calculus_numeric import (  # noqa: E402
     CalculusError, derivative, integrate, parse_bound, partial_derivative,
 )
@@ -409,6 +410,41 @@ class TestShiftedCubeRootTaylor(unittest.TestCase):
         from core.calculus_symbolic import SymbolicError, taylor_poly
         with self.assertRaises(SymbolicError):
             taylor_poly("cbrt(x-1)", point=1, order=2)
+
+
+class TestBranchStabilityNotJustPointValue(unittest.TestCase):
+    """点值为正不等于邻域内恒正。
+
+    x*sign(sign(x)+1) 是连续但不可导的整流形状：x<0 时 f=0，
+    x>=0 时 f=x。外层 sign 的参数 sign(x)+1 在 0 处等于 1，但负侧恒为 0。
+
+    只按点值加正假设，refine 会把外层 sign 化成 1，函数变成 x，
+    左右导数不一致被掩盖，于是错误地给出三阶多项式。
+
+    这些输入在 b859b51 都是正确拒绝的，是本轮错误化简引入的回归。
+    """
+
+    def test_rectifier_continuous_but_not_differentiable(self):
+        with self.assertRaises(SymbolicError):
+            taylor_poly("x*sign(sign(x)+1)", point=0, order=3)
+
+    def test_same_function_abs_form_still_rejected(self):
+        """等价写法 (x+|x|)/2 —— 这条一直是对的，必须保持。"""
+        with self.assertRaises(SymbolicError):
+            taylor_poly("(x+abs(x))/2", point=0, order=3)
+
+    def test_discontinuous_nested_sign(self):
+        with self.assertRaises(SymbolicError):
+            taylor_poly("sign(sign(x)+1)", point=0, order=3)
+
+    def test_discontinuous_nested_sign_fraction(self):
+        with self.assertRaises(SymbolicError):
+            taylor_poly("sign(sign(x)+0.5)", point=0, order=3)
+
+    def test_shifted_nested_sign(self):
+        """同类平移输入，在 1 处不连续。"""
+        with self.assertRaises(SymbolicError):
+            taylor_poly("sign(sign(x-1)+1)", point=1, order=3)
 
 
 class TestSourceEncodingIsIntact(unittest.TestCase):

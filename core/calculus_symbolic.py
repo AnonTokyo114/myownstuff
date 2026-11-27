@@ -587,21 +587,64 @@ def coefficient_list(poly, degree, point=0):
     return [poly_obj.coeff_monomial(t ** power) for power in range(degree + 1)]
 
 
+def _stable_sign_at(arg, symbol, center):
+    """确认 arg 在 center 的两侧邻域里符号一致；返回 1 / -1 / None。
+
+    只看点值是错的：``sign(x)+1`` 在 0 处等于 1，但负侧邻域里恒为 0。
+    拿这个 1 去加 ``Q.positive``，refine 就会把外层 ``sign`` 化简成 1，
+    把真正的分支切换藏起来 —— ``x*sign(sign(x)+1)`` 于是被当成 ``x``，
+    连"左右导数不同"都检查不出来。
+
+    这里在中心两侧、几个数量级的尺度上取样，任何一次符号不一致或取到 0
+    都返回 None（不化简）。宁可慢，也不能把不可导点洗成光滑的。
+    """
+    sp = _require()
+
+    try:
+        at_center = complex(arg.subs(symbol, center))
+    except Exception:                            # noqa: BLE001
+        return None
+    if abs(at_center.imag) > 1e-12:
+        return None
+    value = at_center.real
+    scale = 1e-12 * max(1.0, abs(value))
+    if abs(value) <= scale:
+        return None                              # 点上就是 0，真分支切换
+
+    want = 1 if value > 0 else -1
+    base = max(1.0, abs(float(center)))
+    for magnitude in (1e-2, 1e-4, 1e-6):
+        delta = base * magnitude
+        for offset in (-delta, delta):
+            try:
+                probe = complex(arg.subs(symbol, center + offset))
+            except Exception:                    # noqa: BLE001
+                return None
+            if abs(probe.imag) > 1e-9 * max(1.0, abs(probe)):
+                return None
+            real = probe.real
+            if abs(real) <= 1e-12 * max(1.0, abs(real)):
+                return None                      # 取样点上是 0，分支不稳
+            if (1 if real > 0 else -1) != want:
+                return None                      # 符号变了
+    return want
+
+
 def _localize_at_center(expr_s, symbol, center):
     """按展开点把 Abs / sign / 实根的分支固定下来。
 
-    ``real_root(x, 3)`` 会展开成 ``Abs(x)**(1/3)*sign(x)``。对它逐阶求导
-    再求左右极限极慢 —— 不化简时 ``cbrt(x)`` 在 -1 的校验 30 秒都跑不完。
+    ``real_root(x, 3)`` 会展开成 ``Abs(x)**(1/3)*sign(x)``，对它逐阶求导
+    再求左右极限极慢（不化简时 ``cbrt(x)`` 在 -1 的校验 30 秒都跑不完）。
 
-    关键在于**要看 Abs/sign 内部那个表达式的符号**，而不是自变量本身的
-    符号。``cbrt(x-1)`` 在 0 附近展开时，自变量 x 在 0 两侧都取得到，
-    但 ``x-1`` 始终是负的；只看 x 的符号既推不出结论，也会漏掉
-    ``cbrt(x-2)`` 在 1 这类平移输入。
+    需要看的是 **Abs/sign 内部那个表达式**的符号，不是自变量本身：
+    ``cbrt(x-1)`` 在 0 附近展开时 x 可正可负，但 x-1 始终为负。
 
-    对每个 ``Abs(arg)`` / ``sign(arg)``：
-      * arg 在展开点取正值 -> 加 Q.positive(arg)
-      * arg 在展开点取负值 -> 加 Q.negative(arg)
-      * arg 在展开点为 0   -> **不加**，那是真折点，必须保留双侧检查
+    但**点值不等于局部符号**。``x*sign(sign(x)+1)`` 的外层 sign 参数
+    ``sign(x)+1`` 在 0 处是 1，负侧却恒为 0；若据此化简，原函数会被洗成
+    ``x``，真正的一阶不可导就查不出来了。
+
+    所以每个替选条件都要先通过 :func:`_stable_sign_at` 的两侧多尺度确认；
+    确认不了就保持原样，让双侧存在性检查照常进行。
     """
     sp = _require()
 
@@ -619,22 +662,11 @@ def _localize_at_center(expr_s, symbol, center):
         argument = node.args[0]
         if symbol not in argument.free_symbols:
             continue
-        try:
-            at_center = argument.subs(symbol, center)
-            if at_center.has(sp.zoo, sp.nan) or at_center.is_finite is False:
-                continue
-            value = complex(at_center)
-        except Exception:                        # noqa: BLE001
-            continue
-        if abs(value.imag) > 1e-12:
-            continue
-        real = value.real
-        scale = 1e-12 * max(1.0, abs(real))
-        if real > scale:
-            conditions.append(sp.Q.positive(argument))
-        elif real < -scale:
-            conditions.append(sp.Q.negative(argument))
-        # real ≈ 0：展开点正好落在分支切换处，不化简
+        verdict = _stable_sign_at(argument, symbol, center)
+        if verdict is None:
+            continue                             # 分支不稳，保留原式
+        conditions.append(sp.Q.positive(argument) if verdict > 0
+                          else sp.Q.negative(argument))
 
     if not conditions:
         return expr_s
