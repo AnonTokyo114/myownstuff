@@ -152,6 +152,95 @@ class TestUnicodeBounds(unittest.TestCase):
         self.assertAlmostEqual(complex(value).real, 2.0, places=6)
 
 
+class TestExactDecimalConstants(unittest.TestCase):
+    """表达式里的小数常量必须保持精确。
+
+    to_sympy 如果留下 Float(0.1)，f(0) = sqrt(0.1) 就是近似值，
+    差商 (f(h)-f(0))/h 带舍入残差，除以 h 变成伪无穷 ——
+    sqrt(x^2+0.1) 在 0 会被误判成不可导。
+    换成 1/10 就正常，说明差别只在精度，不在数学。
+    """
+
+    def test_decimal_and_fraction_agree(self):
+        for expr in ("sqrt(x^2+0.1)", "sqrt(x^2+1/10)"):
+            with self.subTest(expr=expr):
+                value, _err = derivative(expr, 0.0)
+                self.assertAlmostEqual(float(value), 0.0, places=4)
+
+    def test_shifted_smooth_curve(self):
+        """平移后的小尺度光滑函数同样不能误拒。"""
+        value, _err = derivative("sqrt((x-2)^2+1e-16)", 2.0)
+        self.assertAlmostEqual(float(value), 0.0, places=3)
+
+    def test_shifted_with_decimal(self):
+        value, _err = derivative("sqrt((x-3)^2+0.25)", 3.0)
+        self.assertAlmostEqual(float(value), 0.0, places=4)
+
+
+class TestFixedVariableIsSubstituted(unittest.TestCase):
+    """固定变量必须真的代入。
+
+    表达式里的符号是 Symbol('y')，如果代码自己造一个
+    Symbol('y', real=True) 去 subs，会静默不替换 —— y=0 没生效，
+    诊断还在比较含 y 的差商，于是误判。
+
+    同一函数固定 y=0 和 y=1，结论必须不同，这样才能证明代入真的发生。
+    """
+
+    def test_y_zero_makes_it_smooth(self):
+        value, _err = partial_derivative("y*abs(x)", ["x", "y"],
+                                         {"x": 0.0, "y": 0.0}, "x")
+        self.assertAlmostEqual(float(value), 0.0, places=6)
+
+    def test_y_one_keeps_the_cusp(self):
+        with self.assertRaises(CalculusError):
+            partial_derivative("y*abs(x)", ["x", "y"],
+                               {"x": 0.0, "y": 1.0}, "x")
+
+    def test_away_from_the_cusp(self):
+        value, _err = partial_derivative("y*abs(x)", ["x", "y"],
+                                         {"x": 1.0, "y": 0.0}, "x")
+        self.assertAlmostEqual(float(value), 0.0, places=6)
+
+    def test_symbol_identity(self):
+        """直接钉住 sympy 的符号相等性，解释为什么必须按名字取。"""
+        import sympy as sp
+        from core.calculus_numeric import to_sympy
+        self.assertNotEqual(sp.Symbol("y"), sp.Symbol("y", real=True))
+        sym = to_sympy("y*abs(x)")
+        self.assertNotIn(sp.Symbol("y", real=True), sym.free_symbols)
+
+
+class TestNoArbitrarySymbolPlaceholder(unittest.TestCase):
+    """诊断不能在任意符号上求极限。
+
+    上一版用 Symbol('_a') 代表求值点，floor 在带正负号假设的符号上
+    求差商极限会失控（实测 8 秒不返回）。现在求值点是具体数字。
+    """
+
+    def test_floor_at_integer_is_rejected_quickly(self):
+        import time
+        start = time.perf_counter()
+        with self.assertRaises(CalculusError):
+            derivative("floor(x)", 1.0)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 5.0,
+                        f"floor(x) 在 1 处诊断用了 {elapsed:.1f} 秒")
+
+    def test_ceil_at_integer(self):
+        with self.assertRaises(CalculusError):
+            derivative("ceil(x)", 1.0)
+
+    def test_floor_plus_slope(self):
+        with self.assertRaises(CalculusError):
+            derivative("floor(x)+x", 1.0)
+
+    def test_floor_between_integers_is_differentiable(self):
+        """整数之间 floor 局部恒定，导数为 0 —— 这个不能拒。"""
+        value, _err = derivative("floor(x)", 0.5)
+        self.assertAlmostEqual(float(value), 0.0, places=6)
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 

@@ -316,11 +316,18 @@ def _sympy_locals():
 def to_sympy(expr: str, var: str = "x"):
     """把内部表达式语法转成 sympy 表达式；转不了返回 None。
 
-    先走 expr_eval 的预处理，这样隐式乘法（``2x``）、上标（``x²``）等
-    合法写法与数值路径保持一致 —— 两条路径必须接受同一套语法。
+    先走 expr_eval 的预处理（隐式乘法 ``2x``、上标 ``x²``），再用
+    ``rationalize`` 把小数常量变成**精确有理数**。
+
+    最后一步是关键：``sqrt(x^2+0.1)`` 如果保留 ``Float(0.1)``，
+    ``f(0) = sqrt(0.1)`` 就是近似值，差商 ``(f(h)-f(0))/h`` 带舍入残差，
+    除以 h 后变成伪无穷。换成 ``Rational(1, 10)`` 后整条链路精确。
     """
     try:
         import sympy as sp
+        from sympy.parsing.sympy_parser import (
+            parse_expr, rationalize, standard_transformations,
+        )
     except ImportError:
         return None
     try:
@@ -328,13 +335,17 @@ def to_sympy(expr: str, var: str = "x"):
     except Exception:                            # noqa: BLE001
         raw = expr
     try:
-        text = raw.replace("^", "**")
-        sym = sp.sympify(text, locals=_sympy_locals())
+        source = raw.replace("^", "**")
+        transforms = standard_transformations + (rationalize,)
+        sym = parse_expr(source, local_dict=_sympy_locals(),
+                         transformations=transforms)
     except Exception:                            # noqa: BLE001
         return None
     if not isinstance(sym, sp.Expr):
         return None
     return sym
+
+
 
 
 def symbolic_differentiable(expr: str, x0: float, order: int = 1,
@@ -344,17 +355,19 @@ def symbolic_differentiable(expr: str, x0: float, order: int = 1,
 
     返回 True（可导）/ False（不可导）/ None（判不了）。
 
-    两个要点：
+    三个要点：
 
     1. 求的是**原始差商的极限**，不是形式导数在点上的值。``abs(x)`` 的
        形式导数是 ``sign(x)``，``sign(0) = 0``，代入会得出「导数为 0」的
        假结论；而左右差商分别是 -1 和 +1。
 
-    2. **求值点用符号占位**，极限算完才代入数值。直接把 ``x0`` 转成
-       ``Float`` 再构造差商，会在 ``(sin(0.4+h) - sin(0.4))/h`` 里留下
-       有限的舍入残差，除以 h 后变成伪无穷 —— ``sin(x)`` 在 0.4 就会被
-       误判成不可导。用符号 ``a`` 时 ``(sin(a+h)-sin(a))/h -> cos(a)``
-       是精确的，最后 ``subs(a, 0.4)`` 只损失一次舍入。
+    2. **全程用精确有理数**：小数常量由 ``rationalize`` 变成 Rational，
+       求值点由 ``Rational(str(x0))`` 给出。任何环节提前浮点化，舍入残差
+       除以 h 都会变成伪无穷。
+
+    3. **不引入任意符号占位**。曾经用 ``Symbol('_a')`` 表示求值点，
+       结果 ``floor`` 这类函数在带正负号假设的任意 a 上求极限会失控
+       （实测 8 秒不返回）。现在 a 是具体数字，差商直接围绕它展开。
     """
     try:
         import sympy as sp
@@ -378,66 +391,51 @@ def symbolic_differentiable(expr: str, x0: float, order: int = 1,
     except Exception:                            # noqa: BLE001
         return None
 
-    # 用表达式自己的符号做 subs：Symbol('x') 和 Symbol('x', real=True)
-    # 在 sympy 里是两个不同对象，用后者 subs 会静默不替换。
-    free = sym.free_symbols
-    target = None
-    for candidate in free:
-        if str(candidate) == var:
-            target = candidate
-            break
+    # 按**名字**从表达式自己的 free_symbols 里取符号。
+    # Symbol('y') 和 Symbol('y', real=True) 是两个不同对象，
+    # 自己造一个新符号去 subs 会静默失败 —— 那样 y=0 根本不会生效。
+    by_name = {}
+    for symbol in sym.free_symbols:
+        by_name[str(symbol)] = symbol
+    target = by_name.get(var)
     if target is None:
         return None
 
-    h = sp.Symbol("_h", positive=True)
-    subs_fixed = {sp.Symbol(k, real=True): sp.Float(float(v))
-                  for k, v in (fixed or {}).items() if k != var}
-
-    def at(offset):
-        """把自变量替换成 offset（可以含 h），并代入其它固定变量。"""
-        value = sym.subs(target, offset)
-        if subs_fixed:
-            value = value.subs(subs_fixed)
-        return value
+    def exact(value):
+        """转成精确有理数；0 直接用 Integer，避免 0.0 变 Float。"""
+        number = float(value)
+        if number == 0.0:
+            return sp.Integer(0)
+        return sp.Rational(str(number))
 
     try:
-        if float(x0) == 0.0:
-            # 0 处没有符号假设可用：直接在 0 展开，靠 h>0 让 Abs 化简。
-            f0 = at(sp.Integer(0))
-            if order == 1:
-                right_expr = (at(h) - f0) / h
-                left_expr = (f0 - at(-h)) / h
-            else:
-                right_expr = (at(2 * h) - 2 * at(h) + f0) / h ** 2
-                left_expr = (f0 - 2 * at(-h) + at(-2 * h)) / h ** 2
-            right = sp.limit(right_expr, h, 0, "+")
-            left = sp.limit(left_expr, h, 0, "+")
-        else:
-            # 非零求值点：按 x0 的符号给 a 加假设。否则 Abs(a+h) 化简不了，
-            # limit 会返回 oo*sign(...)，代入后变成 nan，被误判成不可导
-            # —— abs(x) 在 2 就是这么被误拒的。
-            assumption = {"positive": True} if x0 > 0 else {"negative": True}
-            a = sp.Symbol("_a", real=True, **assumption)
+        subs_fixed = {}
+        for key, value in (fixed or {}).items():
+            if key == var:
+                continue
+            symbol = by_name.get(key)
+            if symbol is not None:
+                subs_fixed[symbol] = exact(value)
 
-            body = sym.subs(target, a)
+        def at(offset):
+            value = sym.subs(target, offset)
             if subs_fixed:
-                body = body.subs(subs_fixed)
+                value = value.subs(subs_fixed)
+            return value
 
-            if order == 1:
-                right_expr = (body.subs(a, a + h) - body) / h
-                left_expr = (body - body.subs(a, a - h)) / h
-            else:
-                right_expr = (body.subs(a, a + 2 * h)
-                              - 2 * body.subs(a, a + h) + body) / h ** 2
-                left_expr = (body - 2 * body.subs(a, a - h)
-                             + body.subs(a, a - 2 * h)) / h ** 2
+        a = exact(x0)
+        h = sp.Symbol("_h", positive=True)
+        f0 = at(a)
 
-            right = sp.limit(right_expr, h, 0, "+")
-            left = sp.limit(left_expr, h, 0, "+")
+        if order == 1:
+            right_expr = (at(a + h) - f0) / h
+            left_expr = (f0 - at(a - h)) / h
+        else:
+            right_expr = (at(a + 2 * h) - 2 * at(a + h) + f0) / h ** 2
+            left_expr = (f0 - 2 * at(a - h) + at(a - 2 * h)) / h ** 2
 
-            a_value = sp.Float(x0)
-            right = sp.simplify(right.subs(a, a_value))
-            left = sp.simplify(left.subs(a, a_value))
+        right = sp.limit(right_expr, h, 0, "+")
+        left = sp.limit(left_expr, h, 0, "+")
     except Exception:                            # noqa: BLE001
         return None
 
@@ -459,6 +457,8 @@ def symbolic_differentiable(expr: str, x0: float, order: int = 1,
     except Exception:                            # noqa: BLE001
         return None
     return False
+
+
 
 
 def _sided_quotients(f, x0, step, order):
