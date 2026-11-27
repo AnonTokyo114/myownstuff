@@ -317,5 +317,99 @@ class TestFocusFeasibilityAndChiefRay(unittest.TestCase):
                         f"像面位置随 t0 变化：{centroids}")
 
 
+class TestSingleRayFocusAndEvenSampling(unittest.TestCase):
+    """焦面可行性的两个边界。
+
+    P2-1  像面半口径 0.01 mm 时每个候选都只剩那条轴上光线：数量恒定，
+          但它在所有像距上都在 y=0，RMS 恒为 0 —— 扫描下界会被当成焦面。
+          数量相同也不等于同一批光线，必须比入口索引集合。
+
+    P2-2  偶数入瞳采样没有 0（10 点是 ±1.39, ±4.17 …），n//2 指向一条
+          偏轴光线，轴上系统的 chief 算成 0.0476 而不是 0。
+    """
+
+    @staticmethod
+    def _build(rows):
+        from core import optics as o
+        surfaces = []
+        for name, R, t, n, semi in rows:
+            surfaces.append(o.Surface(
+                name,
+                float("inf") if R in ("inf", "") else float(R),
+                float(t), float(n),
+                None if semi in ("", None) else float(semi)))
+        z, acc = [], 0.0
+        for surf in surfaces:
+            z.append(acc)
+            acc += surf.t
+        return surfaces, z
+
+    @classmethod
+    def _with_semi(cls, semi):
+        from ui.pages.ray_page import DEFAULTS
+        rows = list(DEFAULTS)
+        name, R, t, n, _old = rows[-1]
+        rows[-1] = (name, R, t, n, semi)
+        return cls._build(rows)
+
+    # ---- P2-1 --------------------------------------------------------
+    def test_single_survivor_is_not_a_focus(self):
+        """0.01 mm 半口径只剩轴上一条，RMS 恒 0，不能报焦面。"""
+        from core import optics as o
+        for semi in ("0.01", "0.001"):
+            with self.subTest(semi=semi):
+                surfaces, z = self._with_semi(semi)
+                with self.assertRaises(ValueError):
+                    o.best_focus(surfaces, z, field_deg=0.0, n_scan=21,
+                                 n_pupil=9)
+
+    def test_survivor_identity_recorded(self):
+        """spot_analysis 要给出幸存光线的入口索引，而不只是数量。"""
+        from core import optics as o
+        surfaces, z = self._build(__import__("ui.pages.ray_page",
+                                             fromlist=["DEFAULTS"]).DEFAULTS)
+        prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=9,
+                               image_gap=38.925)
+        self.assertIn("survivor_groups", prof)
+        self.assertEqual(len(prof["survivor_groups"]), prof["n_reached"])
+
+    def test_vignetting_identity_changes_with_spacing(self):
+        """0.1 mm 时幸存集合确实随像距变 —— 这正是必须拒绝的原因。"""
+        from core import optics as o
+        surfaces, z = self._with_semi("0.1")
+        sets = set()
+        for gap in (22.0, 38.0, 38.9, 42.0, 50.0):
+            prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=9,
+                                   image_gap=gap)
+            sets.add(tuple(prof["survivor_groups"]))
+        self.assertGreater(len(sets), 1,
+                           f"集合应该随像距变化，实际只有 {sets}")
+
+    # ---- P2-2 --------------------------------------------------------
+    def test_even_sampling_chief_is_zero_on_axis(self):
+        """轴上系统：任意采样数下 chief 都必须是 0。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces, z = self._build(DEFAULTS)
+        for n_pupil in (9, 10, 20, 21):
+            with self.subTest(n_pupil=n_pupil):
+                prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=n_pupil,
+                                       image_gap=38.9)
+                self.assertIsNotNone(prof["chief"])
+                self.assertAlmostEqual(prof["chief"], 0.0, places=12)
+
+    def test_even_sampling_chief_off_axis(self):
+        """离轴时偶数采样也要给出和直接追迹一致的中心参考。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces, z = self._build(DEFAULTS)
+        expected = 5.809844351727504
+        for n_pupil in (20, 21):
+            with self.subTest(n_pupil=n_pupil):
+                prof = o.spot_analysis(surfaces, z, 5.0, n_pupil=n_pupil,
+                                       image_gap=38.9)
+                self.assertAlmostEqual(prof["chief"], expected, delta=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()

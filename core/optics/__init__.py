@@ -574,17 +574,32 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         heights = [float(h - z_first * slope) for h in pupil_samples]
 
     rays, _ = trace_rays(system, heights, [field_deg], 'Exact')
-    pts, chief, vignetted = [], None, 0
+
+    # 中心光线（入口 h=0）单独追迹，不掺进 RMS 统计。
+    # 偶数采样时 linspace 里根本没有 0 —— 10 点是 ±1.39, ±4.17 …，
+    # 用 n//2 会把一条偏轴光线当成 chief，轴上系统于是算出 0.0476
+    # 而不是 0。
+    chief = None
+    try:
+        z_chief = float(zz[1]) if len(zz) > 1 else 0.0
+        slope_chief = math.tan(math.radians(field_deg))
+        chief_ray = trace_exact(system, zz,
+                                float(-z_chief * slope_chief),
+                                field_deg)
+        if chief_ray.get('status') == 'Reached image plane':
+            chief = float(chief_ray['path'][-1][1])
+    except Exception:                            # noqa: BLE001
+        chief = None
+
+    pts, vignetted = [], 0
+    survivor_groups = []
     for ray in rays:
         if ray['status'] != 'Reached image plane':
             vignetted += 1
             continue
         y_img = float(ray['path'][-1][1])
         pts.append(y_img)
-        # 用入口采样的序号定位中心光线。旧写法比对 y0==0，
-        # 但离轴时中心样本的发射高度已经是 -z_first*tan(θ)。
-        if chief is None and ray.get('group') == center_index:
-            chief = y_img
+        survivor_groups.append(int(ray.get('group', -1)))
     if not pts:
         raise ValueError(f'No ray reached the image at field {field_deg:g} deg (everything was vignetted).')
 
@@ -602,6 +617,7 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         'rms': rms_centroid,
         'rms_about_chief': rms_chief,
         'pv': float(arr.max() - arr.min()),
+        'survivor_groups': sorted(survivor_groups),
         'chief': chief,
         'points': arr,
     }
@@ -630,7 +646,8 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
                                   image_gap=float(gap))
             except Exception:
                 continue
-            out.append((float(gap), float(r['rms']), int(r['n_reached'])))
+            out.append((float(gap), float(r['rms']), int(r['n_reached']),
+                        tuple(r.get('survivor_groups', ()))))
         return out
 
     def pick(samples):
@@ -639,6 +656,10 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
         比较候选焦面时如果幸存光线集合会变，RMS 的下降可能只是把边缘
         大像差光线切掉了 —— 像面口径一收紧，严重离焦处只剩中心一条，
         RMS 直接归零。那种位置不能算"更优"。
+
+        注意：数量相同不等于**同一批光线**。像面半口径 0.01 mm 时
+        每个候选都只剩那条轴上光线，数量恒定，但它恒在 y=0，
+        RMS 在所有像距上都是 0 —— 那不能用来定位焦面。
         """
         if not samples:
             return None, 0
@@ -663,27 +684,44 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
     fine_hi = min(hi, anchor[0] + step)
     fine = scan(np.linspace(fine_lo, fine_hi, 101))
 
-    best, full = pick(coarse + fine)
+    pool = coarse + fine
+    best, full = pick(pool)
     if best is None:
         raise ValueError('The focus scan produced no valid image plane.')
     if full < widest:
         # 细化反而更差，说明粗扫那一带才是能通光的地方
         best, full = anchor, widest
-    if full < n_pupil and widest < n_pupil:
-        # 全都有光线被挡：这一次真的没有完整通光焦面。
-        # 但如果只是"元件固定裁掉几条"（例如 5° 离轴时固定挡掉 1 条），
-        # 存活集合在各像距上是同一批光线，比较 RMS 仍然有定义。
-        survivors = sorted({item[2] for item in coarse + fine})
-        if len(survivors) == 1:
-            pass          # 固定裁光，允许比较
-        else:
+
+    if full < n_pupil:
+        # 没有完整通光。区分两种情况：
+        #   * 上游元件固定挡掉几条（5° 离轴时固定少 1 条）：
+        #     各像距上是**同一批**入口光线，比较它们的 RMS 有定义
+        #   * 像面口径把边缘切掉，且集合随像距变化：比较的其实是
+        #     不同的光线束，RMS 的下降没有意义
+        # 看**所有**候选的幸存集合，不只是最宽那几个：
+        # 细化区间可能只覆盖一种集合，而粗扫里其它像距
+        # 已经换过一批光线了。
+        keysets = {item[3] for item in pool}
+        if len(keysets) != 1:
             raise ValueError(
                 f'No image plane kept all {n_pupil} rays: the best trial '
-                f'kept {full}. Vary the aperture or gap_range; the number '
-                f'of rays reaching the image changes with spacing, so RMS '
-                f'there would compare different ray bundles.')
+                f'kept {full}. The surviving rays differ between spacings, '
+                f'so an RMS comparison would be against different bundles. '
+                f'Widen the image-plane aperture or the gap range.')
+        if full <= 1:
+            raise ValueError(
+                'Only one ray reaches the image at every spacing, and it '
+                'sits on the axis, so its RMS is zero everywhere and the '
+                'focus cannot be located. Widen the image-plane aperture.')
+        spread = max(item[1] for item in pool if item[2] == full) - \
+            min(item[1] for item in pool if item[2] == full)
+        if spread <= 1e-15:
+            raise ValueError(
+                'The RMS is flat across the whole scan range, so no useful '
+                'focus can be identified. Narrow gap_range around the '
+                'expected focus.')
 
-    curve = [(gap, rms) for gap, rms, _n in coarse]
+    curve = [(gap, rms) for gap, rms, _n, _g in coarse]
     return {
         'base_gap': base_gap,
         'best_gap': best[0],
