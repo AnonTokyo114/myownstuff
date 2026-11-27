@@ -550,8 +550,18 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         zz = validate_surfaces(system)
 
     pmax = pupil_limit(system, zz)
+    # 入口采样点在第一面参考平面上的高度；中心样本始终是 index n//2。
+    # 离轴时发射高度会平移，所以不能再用 abs(y0) 判断谁是中心光线。
     if n_pupil < 2:
-        heights = [0.0]
+        pupil_samples = [0.0]
+    else:
+        pupil_samples = [float(h) for h in np.linspace(-pmax, pmax, n_pupil)]
+    center_index = len(pupil_samples) // 2
+
+    if n_pupil < 2:
+        z_first = float(zz[1]) if len(zz) > 1 else 0.0
+        slope = math.tan(math.radians(field_deg))
+        heights = [float(pupil_samples[0] - z_first * slope)]
     else:
         # 光线起点在 z=0，但**物理上有意义的通光范围在第一个面上**。
         # trace_exact 的 y0 是 z=0 处的高度，离轴时整束光到第一面会
@@ -561,8 +571,7 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         #     y_first = y0 + z_first*tan(θ)  =>  y0 = y_first - z_first*tan(θ)
         z_first = float(zz[1]) if len(zz) > 1 else 0.0
         slope = math.tan(math.radians(field_deg))
-        heights = [float(h - z_first * slope)
-                   for h in np.linspace(-pmax, pmax, n_pupil)]
+        heights = [float(h - z_first * slope) for h in pupil_samples]
 
     rays, _ = trace_rays(system, heights, [field_deg], 'Exact')
     pts, chief, vignetted = [], None, 0
@@ -572,7 +581,9 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
             continue
         y_img = float(ray['path'][-1][1])
         pts.append(y_img)
-        if chief is None and abs(ray['y0']) < 1e-12:
+        # 用入口采样的序号定位中心光线。旧写法比对 y0==0，
+        # 但离轴时中心样本的发射高度已经是 -z_first*tan(θ)。
+        if chief is None and ray.get('group') == center_index:
             chief = y_img
     if not pts:
         raise ValueError(f'No ray reached the image at field {field_deg:g} deg (everything was vignetted).')
@@ -639,26 +650,38 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
     if not coarse:
         raise ValueError('The focus scan produced no valid image plane.')
 
-    best, full = pick(coarse)
-    if best is None or full < n_pupil:
-        raise ValueError(
-            f'The tightest aperture only let {full} of {n_pupil} rays '
-            f'through at every trial spacing, so the scan cannot compare '
-            f'image quality. Widen the image-plane aperture, or reduce '
-            f'n_pupil to match what actually gets through.')
+    # 粗网格只用来定位"最有希望"的区域 —— 它可能整个落在被裁光的区间里。
+    # 像面半口径 0.2 mm 时 21 个粗点最多透过 7 条，而 38.93 mm 附近
+    # 确实有 9 条全部通过；不能因为粗网格没命中断言无解。
+    widest = max(item[2] for item in coarse)
+    anchors = [item for item in coarse if item[2] == widest]
+    anchor = min(anchors, key=lambda item: item[1])
 
-    # 粗扫只保证落在步长内；在最优点左右一个步长内再细化一次，
-    # 否则 21 点扫描在 40 mm 上的步长是 2 mm，会直接跨过真实焦面。
+    # 细化：先在锚点左右一个粗步长内加密，再看能不能找到完整通光。
     step = (hi - lo) / max(2, n_scan - 1)
-    fine_lo = max(lo, best[0] - step)
-    fine_hi = min(hi, best[0] + step)
-    # 101 点是为了让最优点精度达到步长的 1/100：
-    # 21 点在 4 mm 区间上步长 0.2 mm，还会差出几十微米。
+    fine_lo = max(lo, anchor[0] - step)
+    fine_hi = min(hi, anchor[0] + step)
     fine = scan(np.linspace(fine_lo, fine_hi, 101))
-    if fine:
-        refined, _ = pick(fine)
-        if refined is not None and refined[1] < best[1]:
-            best = refined
+
+    best, full = pick(coarse + fine)
+    if best is None:
+        raise ValueError('The focus scan produced no valid image plane.')
+    if full < widest:
+        # 细化反而更差，说明粗扫那一带才是能通光的地方
+        best, full = anchor, widest
+    if full < n_pupil and widest < n_pupil:
+        # 全都有光线被挡：这一次真的没有完整通光焦面。
+        # 但如果只是"元件固定裁掉几条"（例如 5° 离轴时固定挡掉 1 条），
+        # 存活集合在各像距上是同一批光线，比较 RMS 仍然有定义。
+        survivors = sorted({item[2] for item in coarse + fine})
+        if len(survivors) == 1:
+            pass          # 固定裁光，允许比较
+        else:
+            raise ValueError(
+                f'No image plane kept all {n_pupil} rays: the best trial '
+                f'kept {full}. Vary the aperture or gap_range; the number '
+                f'of rays reaching the image changes with spacing, so RMS '
+                f'there would compare different ray bundles.')
 
     curve = [(gap, rms) for gap, rms, _n in coarse]
     return {

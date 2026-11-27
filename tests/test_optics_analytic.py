@@ -223,5 +223,99 @@ class TestFocusScanAndOffAxis(unittest.TestCase):
         page.deleteLater()
 
 
+class TestFocusFeasibilityAndChiefRay(unittest.TestCase):
+    """对焦可行性判定与中心光线识别。
+
+    P2-1  粗网格没命中完整通光区，不代表不存在。
+          像面半口径 0.2 mm 时 21 个粗点最多透过 7 条，
+          但 38.93 mm 附近确实有 9 条全通 —— 不能提前拒绝。
+
+    P2-2  chief 原来用 abs(y0)<1e-12 定位，离轴时入口中心样本的
+          发射高度已经平移成 -z_first*tan(θ)，永远匹配不到。
+          改用入口采样序号（trace_rays 的 group）。
+    """
+
+    @staticmethod
+    def _build(rows):
+        from core import optics as o
+        surfaces = []
+        for name, R, t, n, semi in rows:
+            surfaces.append(o.Surface(
+                name,
+                float("inf") if R in ("inf", "") else float(R),
+                float(t), float(n),
+                None if semi in ("", None) else float(semi)))
+        z, acc = [], 0.0
+        for surf in surfaces:
+            z.append(acc)
+            acc += surf.t
+        return surfaces, z
+
+    @classmethod
+    def _with_image_semi(cls, semi):
+        from ui.pages.ray_page import DEFAULTS
+        rows = list(DEFAULTS)
+        name, R, t, n, _old = rows[-1]
+        rows[-1] = (name, R, t, n, semi)
+        return cls._build(rows)
+
+    # ---- P2-1 --------------------------------------------------------
+    def test_feasible_focus_with_tight_aperture(self):
+        """0.2 mm 半口径仍有 9 条全通的焦面，不能被粗网格否掉。"""
+        from core import optics as o
+        surfaces, z = self._with_image_semi("0.2")
+        result = o.best_focus(surfaces, z, field_deg=0.0, n_scan=21,
+                              n_pupil=9)
+        self.assertEqual(result["n_reached"], 9)
+        self.assertAlmostEqual(result["best_gap"], 38.927, delta=0.1)
+        self.assertAlmostEqual(result["best_rms"] * 1000, 119.96, delta=1.0)
+
+    def test_infeasible_focus_still_rejected(self):
+        """0.1 mm 是真的不可行，必须拒绝。"""
+        from core import optics as o
+        surfaces, z = self._with_image_semi("0.1")
+        with self.assertRaises(ValueError):
+            o.best_focus(surfaces, z, field_deg=0.0, n_scan=21, n_pupil=9)
+
+    def test_fixed_vignetting_allows_comparison(self):
+        """5° 离轴时元件固定挡掉 1 条，存活集合不随像距变，可以比较。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces, z = self._build(DEFAULTS)
+        result = o.best_focus(surfaces, z, field_deg=5.0, n_scan=21,
+                              n_pupil=21)
+        self.assertEqual(result["n_reached"], 20)
+
+    # ---- P2-2 --------------------------------------------------------
+    def test_chief_ray_found_off_axis(self):
+        """5° 离轴时 chief 必须找得到，值要等于直接追迹的结果。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces, z = self._build(DEFAULTS)
+        prof = o.spot_analysis(surfaces, z, 5.0, n_pupil=21,
+                               image_gap=38.9)
+        self.assertIsNotNone(prof["chief"])
+        self.assertAlmostEqual(prof["chief"], 5.809844351727504, delta=1e-9)
+        self.assertIsNotNone(prof["rms_about_chief"])
+        self.assertAlmostEqual(prof["rms_about_chief"],
+                               0.2118778277380495, delta=1e-9)
+
+    def test_single_ray_branch_has_t0_invariance(self):
+        """n_pupil<2 的分支也要做反投影；否则又失去平移不变性。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        centroids = []
+        for t0 in (1.0, 50.0, 140.0):
+            rows = list(DEFAULTS)
+            rows[0] = (rows[0][0], rows[0][1], str(t0),
+                       rows[0][3], rows[0][4])
+            surfaces, z = self._build(rows)
+            prof = o.spot_analysis(surfaces, z, 5.0, n_pupil=1,
+                                   image_gap=38.9)
+            centroids.append(prof["centroid"])
+        self.assertLess(max(centroids) - min(centroids), 1e-9,
+                        f"像面位置随 t0 变化：{centroids}")
+
+
 if __name__ == "__main__":
     unittest.main()

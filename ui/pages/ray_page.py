@@ -320,12 +320,15 @@ class RayPage(QWidget):
                                  mode=self.mode.currentText())
             for idx, ray in enumerate(rays):
                 path = ray.get("path") or []
-                if len(path) < 2:
-                    continue
-                zs = [p[0] for p in path]
-                ys = [p[1] for p in path]
-                colour = f"C{idx % 10}"
-                ax.plot(zs, ys, color=colour, linewidth=0.8, alpha=0.85)
+                if len(path) >= 2:
+                    zs = [p[0] for p in path]
+                    ys = [p[1] for p in path]
+                    colour = f"C{idx % 10}"
+                    ax.plot(zs, ys, color=colour, linewidth=0.8, alpha=0.85)
+                else:
+                    zs, ys = [], []
+                # 红叉和"有没有线段可画"是两件事：光线可能在第一面就被
+                # 截断，path 只有起点，但底层仍然给了 stop_point。
                 if ray.get("status") != "Reached image plane":
                     # 画在**本该到达却没到达**的那个面上。底层已经把它算好
                     # 放在 stop_point（[y, z]）；用 zs[-1] 会画在上一个命中点，
