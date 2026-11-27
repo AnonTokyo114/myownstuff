@@ -632,6 +632,7 @@ def _stable_sign_at(arg, symbol, center):
         return None
 
     center_real = float(center)
+    nearest_gap = None
     for root in roots:
         try:
             root_complex = complex(root)
@@ -643,13 +644,22 @@ def _stable_sign_at(arg, symbol, center):
         # 离中心的相对距离太小，说明分支离得太近，不化简
         if gap <= 1e-12 * max(1.0, abs(center_real)):
             return None
+        if nearest_gap is None or gap < nearest_gap:
+            nearest_gap = gap
 
-    # 补一次以 |center| 为尺度的采样，防止 nroots 数值误差
-    scale = abs(center_real)
-    if scale > 0:
-        for magnitude in (1e-2, 1e-4, 1e-6):
-            delta = scale * magnitude
-            for offset in (-delta, delta):
+    # 补一次采样作为数值交叉检查，防止 nroots 有误差。
+    #
+    # 探测距离必须以**最近根**为上限：nroots 已经知道根在哪里，
+    # 采样越过它就是采样自己错了。x-1 在 0.999 处，根在 1（距 0.001），
+    # 若按 scale=|center|≈1 取 ±0.01，探测点会跨过 1，把本来稳定的
+    # 负分支误判成不稳。
+    scale = abs(center_real) if center_real != 0 else 1.0
+    ceiling = nearest_gap / 4.0 if nearest_gap is not None else scale
+    for magnitude in (1e-2, 1e-4, 1e-6):
+        delta = min(scale * magnitude, ceiling)
+        if delta <= 0:
+            continue
+        for offset in (-delta, delta):
                 try:
                     probe = complex(arg.subs(symbol, center_real + offset))
                 except Exception:                # noqa: BLE001

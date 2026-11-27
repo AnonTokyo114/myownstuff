@@ -511,6 +511,52 @@ class TestStableSignUsesProofNotSamples(unittest.TestCase):
         self.assertIsNone(_stable_sign_at(x, x, 0))
 
 
+class TestProbeStaysInsideTheNearestRoot(unittest.TestCase):
+    """交叉采样不能越过已知的根。
+
+    自测发现：x-1 在 0.999 处应返回 -1（根在 1，距离 0.001），
+    实际返回 None —— 采样距离按 |center|≈1 算，第一组就取 ±0.01，
+    探测点跨过了根 1，符号变化被误当成「分支不稳」。
+
+    nroots 已经知道根在哪儿，采样只是数值交叉检查，必须在根以内。
+    """
+
+    def _sign(self, arg, center):
+        import sympy as sp
+        from core.calculus_symbolic import _stable_sign_at
+        return _stable_sign_at(arg, sp.Symbol("x", real=True), center)
+
+    def test_point_just_below_a_root(self):
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        self.assertEqual(self._sign(x - 1, sp.Rational(999, 1000)), -1)
+
+    def test_point_just_above_a_root(self):
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        self.assertEqual(self._sign(x - 1, sp.Rational(1001, 1000)), 1)
+
+    def test_tiny_center_keeps_its_branch(self):
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        self.assertEqual(self._sign(x, sp.Rational(-1, 1000000)), -1)
+        self.assertEqual(self._sign(x, sp.Rational(1, 1000000)), 1)
+
+    def test_center_exactly_at_root_still_refused(self):
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        self.assertIsNone(self._sign(x - 1, 1))
+
+    def test_end_to_end_near_root_is_fast(self):
+        """cbrt(x-1) 在 0.999 展开：分支稳定，必须及时完成。"""
+        import time
+        import sympy as sp
+        start = time.perf_counter()
+        taylor_poly("cbrt(x-1)", point=sp.Rational(999, 1000), order=3)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 10.0, f"用了 {elapsed:.1f} 秒")
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 
