@@ -160,7 +160,8 @@ _FUNC_BUILDERS = {
     "log10": lambda sp: (lambda x: sp.log(x, 10)),
     "log2": lambda sp: (lambda x: sp.log(x, 2)),
     "sqrt": lambda sp: sp.sqrt,
-    "cbrt": lambda sp: sp.cbrt,
+    # 与 np.cbrt 保持一致：实立方根，不是复主值根
+    "cbrt": lambda sp: (lambda t: sp.real_root(t, 3)),
     "abs": lambda sp: sp.Abs,
     "Abs": lambda sp: sp.Abs,
     # sign 由 abs 求导自然产生，放开它，二阶导数才不会卡住

@@ -299,7 +299,10 @@ def _sympy_locals():
     _SYMPY_LOCALS = {
         "inf": sp.oo, "e": sp.E, "pi": sp.pi,
         "tau": getattr(sp, "tau", 2 * sp.pi), "i": sp.I,
-        "abs": sp.Abs, "sqrt": sp.sqrt, "cbrt": sp.cbrt, "sign": sp.sign,
+        "abs": sp.Abs, "sqrt": sp.sqrt, "sign": sp.sign,
+        # cbrt 必须用实根：np.cbrt(-1) 是 -1，sp.cbrt(-1) 是复主值
+        # 0.5+0.866i，语义不一致会让 -1 处的导数被误判成不存在
+        "cbrt": lambda t: sp.real_root(t, 3),
         "re": sp.re, "im": sp.im, "conj": sp.conjugate, "angle": sp.arg,
         "ceil": sp.ceiling, "floor": sp.floor,
         "sin": sp.sin, "cos": sp.cos, "tan": sp.tan,

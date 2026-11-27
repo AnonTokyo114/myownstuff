@@ -241,6 +241,57 @@ class TestNoArbitrarySymbolPlaceholder(unittest.TestCase):
         self.assertAlmostEqual(float(value), 0.0, places=6)
 
 
+class TestCubeRootMatchesNumericDefinition(unittest.TestCase):
+    """cbrt 的符号语义必须和 np.cbrt 一致 —— 实立方根，不是复主值根。
+
+    数值路径用 np.cbrt(-1) = -1；符号路径原来用 sp.cbrt，
+    得到的是主值根 (-1)**(1/3) ≈ 0.5 + 0.866i。
+
+    后果：cbrt(x) 在 -1 处
+      * 数值差商给出 1/3（正确）
+      * 符号差商极限化简不出，返回 False，把正常导数否掉
+
+    换成 sp.real_root(t, 3) 后左右极限都是精确的 1/3。
+    """
+
+    def test_symbolic_cbrt_is_real(self):
+        """直接钉住映射：cbrt(-1) 必须是 -1。"""
+        import sympy as sp
+        from core.calculus_numeric import _sympy_locals
+        mapped = _sympy_locals()["cbrt"](sp.Integer(-1))
+        self.assertEqual(sp.simplify(mapped), sp.Integer(-1))
+        # 对照：sp.cbrt(-1) 是复数
+        self.assertNotEqual(sp.simplify(sp.cbrt(-1)), sp.Integer(-1))
+
+    def test_negative_points(self):
+        """负数的三个控制点，不能只验一个。"""
+        cases = [(-1.0, 1.0 / 3.0),
+                 (-8.0, 1.0 / 12.0),
+                 (-27.0, 1.0 / 27.0)]
+        for x0, want in cases:
+            with self.subTest(x0=x0):
+                value, _err = derivative("cbrt(x)", x0)
+                self.assertAlmostEqual(float(value), want, places=6)
+
+    def test_positive_points(self):
+        cases = [(1.0, 1.0 / 3.0),
+                 (8.0, 1.0 / 12.0),
+                 (2.0, 1.0 / (3 * 2 ** (2.0 / 3.0)))]
+        for x0, want in cases:
+            with self.subTest(x0=x0):
+                value, _err = derivative("cbrt(x)", x0)
+                self.assertAlmostEqual(float(value), want, places=6)
+
+    def test_fractional_point(self):
+        value, _err = derivative("cbrt(x)", 0.125)
+        self.assertAlmostEqual(float(value), 1.0 / 0.75, places=6)
+
+    def test_partial_uses_cbrt(self):
+        value, _err = partial_derivative("cbrt(x)+y", ["x", "y"],
+                                         {"x": -1.0, "y": 0.0}, "x")
+        self.assertAlmostEqual(float(value), 1.0 / 3.0, places=6)
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 
