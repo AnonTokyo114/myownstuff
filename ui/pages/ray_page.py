@@ -17,6 +17,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QAbstractItemView,
     QComboBox,
     QFrame,
@@ -178,6 +179,13 @@ class RayPage(QWidget):
         self.mode.setFixedWidth(110)
         params_layout.addWidget(self.mode)
 
+        self.equal_aspect = QCheckBox("Equal aspect")
+        self.equal_aspect.setToolTip(
+            "1:1 显示 z 与 y。光路通常又长又窄，默认关闭；"
+            "检查曲率和折射角是否被拉伸时打开。")
+        self.equal_aspect.setChecked(False)
+        params_layout.addWidget(self.equal_aspect)
+
         self.trace_btn = QPushButton("Re-trace")
         self.trace_btn.setObjectName("primary")
         self.trace_btn.setFixedWidth(104)
@@ -201,6 +209,7 @@ class RayPage(QWidget):
         self.btn_rays.clicked.connect(lambda: self.recompute(view="rays"))
         self.btn_quals.clicked.connect(lambda: self.recompute(view="qual"))
         self.mode.currentIndexChanged.connect(lambda _i: self.recompute())
+        self.equal_aspect.toggled.connect(lambda _c: self.recompute())
 
         self.load_defaults()
 
@@ -318,8 +327,19 @@ class RayPage(QWidget):
                 colour = f"C{idx % 10}"
                 ax.plot(zs, ys, color=colour, linewidth=0.8, alpha=0.85)
                 if ray.get("status") != "Reached image plane":
-                    ax.plot(zs[-1:], ys[-1:], marker="x", color="#b3261e",
-                            markersize=4)
+                    # 画在**本该到达却没到达**的那个面上。底层已经把它算好
+                    # 放在 stop_point（[y, z]）；用 zs[-1] 会画在上一个命中点，
+                    # 看起来像在透镜内部截断。
+                    stop = ray.get("stop_point")
+                    if stop is not None:
+                        ax.plot([float(stop[1])], [float(stop[0])],
+                                marker="x", color="#b3261e", markersize=5)
+                    else:
+                        ax.plot(zs[-1:], ys[-1:], marker="x",
+                                color="#b3261e", markersize=4)
+            if self.equal_aspect.isChecked():
+                # datalim: 保持 1:1 但不强改用户已拖好的范围
+                ax.set_aspect("equal", adjustable="datalim")
             ax.set_xlabel("z (mm)")
             ax.set_ylabel("y (mm)")
             ax.set_title("Ray diagram")
@@ -382,7 +402,9 @@ class RayPage(QWidget):
             sp = spot_analysis(surfaces, z, 0.0, n_pupil=9)
             rms, pv = sp.get("rms"), sp.get("pv")
             if rms is not None:
-                parts.append(f"on-axis spot RMS {rms * 1000:.2f} µm / PV {pv * 1000:.2f} µm")
+                parts.append(
+                f"on-axis meridional spot RMS {rms * 1000:.2f} µm "
+                f"/ PV {pv * 1000:.2f} µm (1D 子午采样)")
         except Exception:
             pass
 

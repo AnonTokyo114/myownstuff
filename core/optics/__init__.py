@@ -550,8 +550,19 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         zz = validate_surfaces(system)
 
     pmax = pupil_limit(system, zz)
-    heights = ([0.0] if n_pupil < 2
-               else [float(h) for h in np.linspace(-pmax, pmax, n_pupil)])
+    if n_pupil < 2:
+        heights = [0.0]
+    else:
+        # 光线起点在 z=0，但**物理上有意义的通光范围在第一个面上**。
+        # trace_exact 的 y0 是 z=0 处的高度，离轴时整束光到第一面会
+        # 平移 z_first*tan(θ) —— 若直接在 z=0 铺开 [-pmax, pmax]，
+        # 第一面处的光束就会偏出孔径，t0 一变 RMS 和渐晕跟着变。
+        # 无穷远物点的成像结果不应依赖 t0，所以这里按第一面反推起点：
+        #     y_first = y0 + z_first*tan(θ)  =>  y0 = y_first - z_first*tan(θ)
+        z_first = float(zz[1]) if len(zz) > 1 else 0.0
+        slope = math.tan(math.radians(field_deg))
+        heights = [float(h - z_first * slope)
+                   for h in np.linspace(-pmax, pmax, n_pupil)]
 
     rays, _ = trace_rays(system, heights, [field_deg], 'Exact')
     pts, chief, vignetted = [], None, 0
@@ -600,23 +611,62 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
     if hi <= lo:
         raise ValueError('Invalid focus-scan range.')
 
-    curve, best = [], None
-    for gap in np.linspace(lo, hi, max(3, n_scan)):
-        try:
-            r = spot_analysis(surfaces, z, field_deg, n_pupil=n_pupil,
-                              image_gap=float(gap))
-        except Exception:
-            continue
-        curve.append((float(gap), r['rms']))
-        if best is None or r['rms'] < best[1]:
-            best = (float(gap), r['rms'])
-    if best is None or not curve:
+    def scan(gaps):
+        out = []
+        for gap in gaps:
+            try:
+                r = spot_analysis(surfaces, z, field_deg, n_pupil=n_pupil,
+                                  image_gap=float(gap))
+            except Exception:
+                continue
+            out.append((float(gap), float(r['rms']), int(r['n_reached'])))
+        return out
+
+    def pick(samples):
+        """在保持完整通光的位置里挑最小 RMS。
+
+        比较候选焦面时如果幸存光线集合会变，RMS 的下降可能只是把边缘
+        大像差光线切掉了 —— 像面口径一收紧，严重离焦处只剩中心一条，
+        RMS 直接归零。那种位置不能算"更优"。
+        """
+        if not samples:
+            return None, 0
+        full = max(item[2] for item in samples)
+        usable = [item for item in samples if item[2] >= full]
+        return min(usable, key=lambda item: item[1]), full
+
+    coarse = scan(np.linspace(lo, hi, max(3, n_scan)))
+    if not coarse:
         raise ValueError('The focus scan produced no valid image plane.')
+
+    best, full = pick(coarse)
+    if best is None or full < n_pupil:
+        raise ValueError(
+            f'The tightest aperture only let {full} of {n_pupil} rays '
+            f'through at every trial spacing, so the scan cannot compare '
+            f'image quality. Widen the image-plane aperture, or reduce '
+            f'n_pupil to match what actually gets through.')
+
+    # 粗扫只保证落在步长内；在最优点左右一个步长内再细化一次，
+    # 否则 21 点扫描在 40 mm 上的步长是 2 mm，会直接跨过真实焦面。
+    step = (hi - lo) / max(2, n_scan - 1)
+    fine_lo = max(lo, best[0] - step)
+    fine_hi = min(hi, best[0] + step)
+    # 101 点是为了让最优点精度达到步长的 1/100：
+    # 21 点在 4 mm 区间上步长 0.2 mm，还会差出几十微米。
+    fine = scan(np.linspace(fine_lo, fine_hi, 101))
+    if fine:
+        refined, _ = pick(fine)
+        if refined is not None and refined[1] < best[1]:
+            best = refined
+
+    curve = [(gap, rms) for gap, rms, _n in coarse]
     return {
         'base_gap': base_gap,
         'best_gap': best[0],
         'best_rms': best[1],
         'curve': curve,
+        'n_reached': best[2],
     }
 
 

@@ -124,5 +124,104 @@ class TestPrincipalPlanes(unittest.TestCase):
         self.assertAlmostEqual(fp["power"] * fp["efl"], 1.0, places=9)
 
 
+class TestFocusScanAndOffAxis(unittest.TestCase):
+    """像质评估的两处定量问题。
+
+    来自对光学报告的核对（code_artifact.html + 审阅）：
+
+    best_focus 原来在 [0.55, 1.55]×像距上做 21 点均匀扫描，40 mm 时步长
+    2 mm，直接跨过真实焦面 38.92 mm，报 38.00 mm；若像面口径收紧，
+    严重离焦处只剩中心光线，RMS 归零会被误当成最优。
+
+    spot_analysis 原来在 z=0 铺开 [-pmax, pmax] 并把 y0=0 当主光线；
+    离轴时整束光到第一面会平移 z_first·tan(θ)，于是 t0 一变 RMS 就变
+    —— 无穷远物点的成像结果不该依赖 t0。
+    """
+
+    @staticmethod
+    def _build(rows):
+        from core import optics as o
+        surfaces = []
+        for name, R, t, n, semi in rows:
+            surfaces.append(o.Surface(
+                name,
+                float("inf") if R in ("inf", "") else float(R),
+                float(t), float(n),
+                None if semi in ("", None) else float(semi)))
+        z, acc = [], 0.0
+        for surf in surfaces:
+            z.append(acc)
+            acc += surf.t
+        return surfaces, z
+
+    @classmethod
+    def _defaults(cls):
+        from ui.pages.ray_page import DEFAULTS
+        return cls._build(DEFAULTS)
+
+    def test_best_focus_finds_true_minimum(self):
+        """细扫最优约 38.92 mm / 120 µm；粗扫曾经给 38.00 / 164.5。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        result = o.best_focus(surfaces, z, field_deg=0.0, n_scan=21, n_pupil=9)
+        self.assertAlmostEqual(result["best_gap"], 38.925, delta=0.05)
+        self.assertAlmostEqual(result["best_rms"] * 1000, 119.96, delta=1.0)
+
+    def test_best_focus_rejects_vignetted_optimum(self):
+        """像面半口径 0.1 mm 时不能报 RMS=0 的假优。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        rows = list(DEFAULTS)
+        name, R, t, n, _semi = rows[-1]
+        rows[-1] = (name, R, t, n, "0.1")
+        surfaces, z = self._build(rows)
+        with self.assertRaises(ValueError):
+            o.best_focus(surfaces, z, field_deg=0.0, n_scan=21, n_pupil=9)
+
+    def test_off_axis_independent_of_object_distance(self):
+        """5° 离轴时，改变 t0 不应改变 RMS 或幸存光线数。"""
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        results = []
+        for t0 in (1.0, 50.0, 140.0):
+            rows = list(DEFAULTS)
+            rows[0] = (rows[0][0], rows[0][1], str(t0),
+                       rows[0][3], rows[0][4])
+            surfaces, z = self._build(rows)
+            prof = o.spot_analysis(surfaces, z, 5.0, n_pupil=21,
+                                   image_gap=38.925)
+            results.append((prof["rms"], prof["n_reached"]))
+        rms_values = [r for r, _n in results]
+        reached = [n for _r, n in results]
+        self.assertEqual(len(set(reached)), 1,
+                         f"幸存光线数随 t0 变化：{reached}")
+        spread = (max(rms_values) - min(rms_values)) / max(rms_values)
+        self.assertLess(spread, 0.02,
+                        f"RMS 随 t0 变化 {spread*100:.1f}%：{rms_values}")
+
+    def test_on_axis_unchanged(self):
+        """轴上结果不受本次改动影响。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=9,
+                               image_gap=38.925)
+        self.assertEqual(prof["n_reached"], 9)
+        self.assertAlmostEqual(prof["rms"] * 1000, 119.96, delta=1.0)
+
+    def test_ray_page_has_equal_aspect_toggle(self):
+        """光线图要有等比例开关，且默认关闭（光路通常又长又窄）。"""
+        import os
+        os.environ.setdefault("QT_API", "pyside6")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.pages.ray_page import RayPage
+        page = RayPage()
+        self.assertFalse(page.equal_aspect.isChecked())
+        page.equal_aspect.setChecked(True)
+        app.processEvents()
+        page.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()
