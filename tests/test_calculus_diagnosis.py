@@ -292,6 +292,66 @@ class TestCubeRootMatchesNumericDefinition(unittest.TestCase):
         self.assertAlmostEqual(float(value), 1.0 / 3.0, places=6)
 
 
+class TestCubeRootTaylorAtNegativePoints(unittest.TestCase):
+    """cbrt 在负点的 Taylor 展开既要正确，也要及时返回。
+
+    修好实根语义后，real_root 会给出 Abs(x)**(1/3)*sign(x)。校验分支
+    对它逐阶求导再求左右极限，30 秒都算不完 —— 多项式本身早就生成好了，
+    卡的是后面的存在性检查。
+
+    现在校验前会按展开点的符号 refine，分支固定后极限运算降到毫秒级。
+    """
+
+    def _poly(self, point, order):
+        from core.calculus_symbolic import taylor_poly
+        poly, _warnings = taylor_poly("cbrt(x)", point=point, order=order)
+        return poly
+
+    def test_negative_point_completes_quickly(self):
+        import time
+        start = time.perf_counter()
+        self._poly(-1, 3)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 10.0,
+                        f"cbrt 在 -1 的三阶展开用了 {elapsed:.1f} 秒")
+
+    def test_negative_point_matches_analytic(self):
+        """cbrt(x) 在 -1 展开：-1 + (x+1)/3 + (x+1)^2/9 + 5(x+1)^3/81。"""
+        import sympy as sp
+        poly = self._poly(-1, 3)
+        # 用多项式自己的符号：Symbol('x') 和 Symbol('x', real=True)
+        # 是两个不同对象，拿错一个相减会得到非零
+        x = poly.free_symbols.pop()
+        expected = (-1 + (x + 1) / 3 + (x + 1) ** 2 / 9
+                    + 5 * (x + 1) ** 3 / 81)
+        # sympy 的 == 比结构不比数学，各自展开后相减才准确
+        self.assertEqual(sp.expand(poly) - sp.expand(expected), 0)
+
+    def test_positive_point_matches_analytic(self):
+        import sympy as sp
+        poly = self._poly(1, 3)
+        x = poly.free_symbols.pop()
+        expected = (1 + (x - 1) / 3 - (x - 1) ** 2 / 9
+                    + 5 * (x - 1) ** 3 / 81)
+        # sympy 的 == 比结构不比数学，各自展开后相减才准确
+        self.assertEqual(sp.expand(poly) - sp.expand(expected), 0)
+
+    def test_other_negative_point(self):
+        import sympy as sp
+        poly = self._poly(-8, 2)
+        x = poly.free_symbols.pop()
+        # cbrt(-8) = -2，f'(-8) = 1/12，f''(-8) = -1/144
+        expected = -2 + (x + 8) / 12 + (x + 8) ** 2 / 288
+        # sympy 的 == 比结构不比数学，各自展开后相减才准确
+        self.assertEqual(sp.expand(poly) - sp.expand(expected), 0)
+
+    def test_cusp_still_rejected(self):
+        """展开点在 0 处仍然是真折点，不能因为优化而放行。"""
+        from core.calculus_symbolic import SymbolicError, taylor_poly
+        with self.assertRaises(SymbolicError):
+            taylor_poly("cbrt(x)", point=0, order=2)
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 

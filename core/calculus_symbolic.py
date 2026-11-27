@@ -587,6 +587,33 @@ def coefficient_list(poly, degree, point=0):
     return [poly_obj.coeff_monomial(t ** power) for power in range(degree + 1)]
 
 
+def _localize_at_center(expr_s, symbol, center):
+    """在展开点邻域内按符号化简分段函数。
+
+    ``real_root(x, 3)`` 会被 sympy 展开成 ``Abs(x)**(1/3)*sign(x)``。
+    对它逐阶求导再求左右极限极慢 —— ``cbrt(x)`` 在 -1 处三阶展开时，
+    单是 k=1 的 ``sp.limit`` 就 30 秒没返回。
+
+    展开点不在 0 时，邻域内自变量的符号是固定的，可以先 ``refine`` 成
+    分支明确的表达式：``-1`` 附近是 ``-(-x)**(1/3)``，``1`` 附近是
+    ``x**(1/3)``。化简后求导和极限都是毫秒级。
+
+    ``center == 0`` 时刻意**不动**：那里两边符号不同，正是真折点，
+    必须保留原来的 Abs/sign 让检查能发现它。
+    """
+    if center == 0:
+        return expr_s
+    sp = _require()
+    condition = sp.Q.positive(symbol) if center > 0 else sp.Q.negative(symbol)
+    try:
+        refined = sp.refine(expr_s, condition)
+    except Exception:                            # noqa: BLE001
+        return expr_s
+    if refined is None or refined.has(sp.zoo, sp.nan):
+        return expr_s
+    return refined
+
+
 def _validate_taylor(expr_s, symbol, poly, center, order):
     """确认 poly 真的是 expr 在 center 处的 order 阶泰勒多项式。
 
@@ -600,6 +627,10 @@ def _validate_taylor(expr_s, symbol, poly, center, order):
       * 只在展开点一侧吻合（``abs(x)`` 这类不可导点）
     """
     sp = _require()
+
+    # 先把展开点邻域内的分段结构化简掉：real_root 产生的
+    # Abs/sign 会让后面每一阶的符号极限运算失控（详见 _localize_at_center）。
+    expr_s = _localize_at_center(expr_s, symbol, center)
 
     if not poly.is_polynomial(symbol):
         raise SymbolicError(
