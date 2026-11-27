@@ -447,6 +447,70 @@ class TestBranchStabilityNotJustPointValue(unittest.TestCase):
             taylor_poly("sign(sign(x-1)+1)", point=1, order=3)
 
 
+class TestStableSignUsesProofNotSamples(unittest.TestCase):
+    """判断分支是否稳定，必须用多项式零点，不能靠固定采样。
+
+    两个反例：
+
+    采样距离用 max(1, |center|) 时，cbrt(x) 在 -0.001 的探测点是 ±0.01，
+    直接跨过 x=0，于是误判分支不稳、放弃化简、校验重新变慢。
+
+    六个固定点在 x*sign(sign(x)-sign(10000000*x+1)+2) 上全为正
+    （该参数在 (-1e-7, 0) 内恰好为 0），固定采样进不去这么窄的区间，
+    错误化简后函数变成 x，一阶不可导被掩盖。
+    """
+
+    def test_small_center_is_fast(self):
+        """cbrt(x) 在 -0.001：x 在这个邻域里严格为负。"""
+        import time
+        start = time.perf_counter()
+        taylor_poly("cbrt(x)", point=-0.001, order=3)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 10.0,
+                        f"cbrt 在 -0.001 用了 {elapsed:.1f} 秒")
+
+    def test_small_center_coefficients(self):
+        import sympy as sp
+        poly, _w = taylor_poly("cbrt(x)", point=-0.001, order=3)
+        x = poly.free_symbols.pop()
+        # cbrt(x) 在 a 处：a^(1/3) + (x-a)/(3a^(2/3)) + ...
+        a = sp.Rational(-1, 1000)
+        base = sp.real_root(a, 3)
+        expected = (base + (x - a) / (3 * base ** 2)
+                    - (x - a) ** 2 / (9 * base ** 5)
+                    + 5 * (x - a) ** 3 / (81 * base ** 8))
+        # series 给出的系数带浮点，逐项用容差比较
+        diff = sp.expand(poly - expected)
+        coeffs = sp.Poly(diff, x).all_coeffs()
+        for coeff in coeffs:
+            self.assertLess(abs(complex(sp.N(coeff))), 1e-12)
+
+    def test_narrow_branch_is_rejected(self):
+        """分支只在一段极窄区间里切换，也不能被采样漏掉。"""
+        with self.assertRaises(SymbolicError):
+            taylor_poly("x*sign(sign(x)-sign(10000000*x+1)+2)",
+                        point=0, order=3)
+
+    def test_non_polynomial_argument_never_gets_assumed(self):
+        """含 sign 的参数一律不化简 —— 它的零点无法可靠求出。"""
+        from core.calculus_symbolic import _stable_sign_at
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        for arg in (sp.sign(x) + 1,
+                    sp.sign(x) - sp.sign(10000000 * x + 1) + 2):
+            with self.subTest(arg=arg):
+                self.assertIsNone(_stable_sign_at(arg, x, 0))
+
+    def test_polynomial_argument_gets_proved(self):
+        """线性参数有明确的零点，可以给出稳定结论。"""
+        from core.calculus_symbolic import _stable_sign_at
+        import sympy as sp
+        x = sp.Symbol("x", real=True)
+        self.assertEqual(_stable_sign_at(x - 1, x, 0), -1)
+        self.assertEqual(_stable_sign_at(x, x, sp.Rational(-1, 1000)), -1)
+        self.assertIsNone(_stable_sign_at(x, x, 0))
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 

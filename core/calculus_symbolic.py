@@ -588,17 +588,29 @@ def coefficient_list(poly, degree, point=0):
 
 
 def _stable_sign_at(arg, symbol, center):
-    """确认 arg 在 center 的两侧邻域里符号一致；返回 1 / -1 / None。
+    """确认 arg 在 center 附近保持同号；返回 1 / -1 / None。
 
-    只看点值是错的：``sign(x)+1`` 在 0 处等于 1，但负侧邻域里恒为 0。
-    拿这个 1 去加 ``Q.positive``，refine 就会把外层 ``sign`` 化简成 1，
-    把真正的分支切换藏起来 —— ``x*sign(sign(x)+1)`` 于是被当成 ``x``，
-    连"左右导数不同"都检查不出来。
+    只看点值是错的：``sign(x)+1`` 在 0 处等于 1，负侧邻域里却恒为 0。
 
-    这里在中心两侧、几个数量级的尺度上取样，任何一次符号不一致或取到 0
-    都返回 None（不化简）。宁可慢，也不能把不可导点洗成光滑的。
+    但**有限采样同样证明不了**。``sign(x)-sign(10000000*x+1)+2`` 在
+    0 处是 1，在 ±1e-2 / ±1e-4 / ±1e-6 处都是 2，偏偏在 (-1e-7, 0) 内
+    等于 0 —— 任何固定的一组探测点都可能漏掉这种窄分支。
+
+    所以这里只对**多项式**给结论：多项式的零点有限且可求，能确证
+    center 不是零点、最近的实零点也隔着一段距离。含 sign / Abs 等
+    分支构造的表达式一律返回 None，保留原始的双侧存在性检查。
+
+    采样距离以 ``|center|`` 为尺度（不是 max(1, |center|)）：
+    ``cbrt(x)`` 在 -0.001 展开时，±0.01 的探测点会跨过 x=0，
+    把本来严格为负的邻域误判成不稳。
     """
     sp = _require()
+
+    try:
+        if not arg.is_polynomial(symbol):
+            return None                          # 分支可能藏在任意窄区间
+    except Exception:                            # noqa: BLE001
+        return None
 
     try:
         at_center = complex(arg.subs(symbol, center))
@@ -607,27 +619,50 @@ def _stable_sign_at(arg, symbol, center):
     if abs(at_center.imag) > 1e-12:
         return None
     value = at_center.real
-    scale = 1e-12 * max(1.0, abs(value))
-    if abs(value) <= scale:
-        return None                              # 点上就是 0，真分支切换
+    if abs(value) <= 1e-12 * max(1.0, abs(value)):
+        return None                              # 点上就是 0
 
-    want = 1 if value > 0 else -1
-    base = max(1.0, abs(float(center)))
-    for magnitude in (1e-2, 1e-4, 1e-6):
-        delta = base * magnitude
-        for offset in (-delta, delta):
-            try:
-                probe = complex(arg.subs(symbol, center + offset))
-            except Exception:                    # noqa: BLE001
-                return None
-            if abs(probe.imag) > 1e-9 * max(1.0, abs(probe)):
-                return None
-            real = probe.real
-            if abs(real) <= 1e-12 * max(1.0, abs(real)):
-                return None                      # 取样点上是 0，分支不稳
-            if (1 if real > 0 else -1) != want:
-                return None                      # 符号变了
-    return want
+    # 多项式求根，确认 center 到最近实零点有正距离
+    try:
+        poly = sp.Poly(arg, symbol)
+        if poly.degree() < 1:
+            return 1 if value > 0 else -1        # 常数，必然同号
+        roots = poly.nroots()
+    except Exception:                            # noqa: BLE001
+        return None
+
+    center_real = float(center)
+    for root in roots:
+        try:
+            root_complex = complex(root)
+        except Exception:                        # noqa: BLE001
+            return None
+        if abs(root_complex.imag) > 1e-9:
+            continue                             # 复根不影响实轴符号
+        gap = abs(root_complex.real - center_real)
+        # 离中心的相对距离太小，说明分支离得太近，不化简
+        if gap <= 1e-12 * max(1.0, abs(center_real)):
+            return None
+
+    # 补一次以 |center| 为尺度的采样，防止 nroots 数值误差
+    scale = abs(center_real)
+    if scale > 0:
+        for magnitude in (1e-2, 1e-4, 1e-6):
+            delta = scale * magnitude
+            for offset in (-delta, delta):
+                try:
+                    probe = complex(arg.subs(symbol, center_real + offset))
+                except Exception:                # noqa: BLE001
+                    return None
+                if abs(probe.imag) > 1e-9 * max(1.0, abs(probe)):
+                    return None
+                real = probe.real
+                if abs(real) <= 1e-12 * max(1.0, abs(real)):
+                    return None
+                if (1 if real > 0 else -1) != (1 if value > 0 else -1):
+                    return None
+
+    return 1 if value > 0 else -1
 
 
 def _localize_at_center(expr_s, symbol, center):
