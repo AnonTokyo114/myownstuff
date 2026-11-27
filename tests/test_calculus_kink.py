@@ -126,6 +126,85 @@ class TestDifferentiableStillWorks(unittest.TestCase):
         self.assertAlmostEqual(float(value), 3.0, places=5)
 
 
+class TestSlowlyConvergingIsStillDifferentiable(unittest.TestCase):
+    """可导函数的差商可以**任意慢**地收敛，不能用固定速率当判据。
+
+    |x|^p（1 < p < 2）在 0 处都可导、导数为 0，但
+    gap(h) = 2*h^(p-1) 收敛得很慢：
+
+      p = 4/3   缩 4 倍只降到 0.63
+      p = 1.25  缩 4 倍只降到 0.71
+
+    最初的判据要求「gap 至少减半」，于是把它们全判成了不可导。
+    只有 p = 1（|x| 本身）的 gap 才是常数 2。
+    """
+
+    def test_fractional_powers(self):
+        # p 越接近 1 收敛越慢：p=1.05 跨 64 倍只降到 0.81，
+        # p=1.01 只降到 0.96 —— 门槛必须高于这些值才能不误拒。
+        for expr in ("abs(x)^1.01", "abs(x)^1.05", "abs(x)^1.1",
+                     "abs(x)^(4/3)", "abs(x)^1.25", "abs(x)^1.4",
+                     "abs(x)^1.5", "abs(x)^2"):
+            with self.subTest(expr=expr):
+                value, _err = derivative(expr, 0.0)
+                self.assertAlmostEqual(float(value), 0.0, places=4)
+
+    def test_second_order_fractional(self):
+        """x*|x|^(4/3) 的二阶导存在且为 0。"""
+        value, _err = derivative("x*abs(x)^(4/3)", 0.0, order=2)
+        self.assertAlmostEqual(float(value), 0.0, places=3)
+
+    def test_partial_derivative_fractional(self):
+        value, _err = partial_derivative("abs(x)^(4/3)+y", ["x", "y"],
+                                         {"x": 0.0, "y": 1.0}, "x")
+        self.assertAlmostEqual(float(value), 0.0, places=4)
+
+    def test_second_partial_fractional(self):
+        value, _err = partial_derivative("x*abs(x)^(4/3)+y", ["x", "y"],
+                                         {"x": 0.0, "y": 1.0}, "x",
+                                         order=2)
+        self.assertAlmostEqual(float(value), 0.0, places=3)
+
+
+class TestInsufficientSampling(unittest.TestCase):
+    """默认步长解析不了函数尺度时，不能断言不可导。
+
+    cos(200000*x) 在 0 处导数为 0；默认步长 1e-4 覆盖了上百个周期，
+    左右差商完全失去意义。这属于数值精度问题，不是可导性问题 ——
+    判据必须在 gap 反而变大时退让。
+    """
+
+    def test_high_frequency_cosine(self):
+        value, _err = derivative("cos(200000*x)", 0.0)
+        self.assertAlmostEqual(float(value), 0.0, delta=1e-2)
+
+    def test_medium_frequency_cosine(self):
+        value, _err = derivative("cos(100000*x)", 0.0)
+        self.assertAlmostEqual(float(value), 0.0, delta=1e-2)
+
+
+class TestGapBehaviour(unittest.TestCase):
+    """判据依赖的性质本身也要钉住。"""
+
+    def test_gap_is_constant_for_abs(self):
+        """|x| 的 gap 恒为 2，不随步长变化 —— 这才是折点的标志。"""
+        f = abs
+        for h in (1e-3, 1e-4, 1e-5):
+            gap = abs((f(0.0) - f(-h)) / h - (f(h) - f(0.0)) / h)
+            self.assertAlmostEqual(gap, 2.0, places=6)
+
+    def test_gap_decays_slowly_for_fractional_power(self):
+        """|x|^(4/3) 的 gap 收敛得慢，但确实在降。"""
+        f = lambda t: abs(t) ** (4.0 / 3.0)   # noqa: E731
+        gaps = []
+        for h in (1e-3, 1e-4, 1e-5):
+            gaps.append(abs((f(0.0) - f(-h)) / h - (f(h) - f(0.0)) / h))
+        self.assertGreater(gaps[0], gaps[1])
+        self.assertGreater(gaps[1], gaps[2])
+        # 步长从 1e-3 降到 1e-5（100 倍），gap 只降到 100^(-1/3) ≈ 0.215
+        self.assertAlmostEqual(gaps[2] / gaps[0], 100 ** (-1 / 3), places=2)
+
+
 class TestSymmetricZeroIsNotProof(unittest.TestCase):
     """把「对称差分为零」和「导数为零」区分开。"""
 

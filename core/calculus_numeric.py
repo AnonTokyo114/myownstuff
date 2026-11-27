@@ -304,30 +304,48 @@ def _kink_check(f, x0, step, order):
     只有 gap 明显不随步长收敛时才拒绝。取不到值（越界、求值失败）就
     放弃判断，交给调用方按原逻辑处理。
     """
-    try:
-        l1, r1 = _sided_quotients(f, x0, step, order)
-        l2, r2 = _sided_quotients(f, x0, step / 4.0, order)
-    except Exception:                            # noqa: BLE001
+    scales = [step, step / 4.0, step / 16.0, step / 64.0]
+    gaps = []
+    sample = None
+    for scale_step in scales:
+        try:
+            left, right = _sided_quotients(f, x0, scale_step, order)
+        except Exception:                        # noqa: BLE001
+            return                                   # 取不到值就不判
+        gaps.append(abs(left - right))
+        if sample is None:
+            sample = (left, right)
+
+    # 两侧一上来就一致（浮点噪声量级）：没得判
+    if gaps[0] <= 1e-9 * max(1.0, abs(sample[0]), abs(sample[1])):
         return
 
-    gap1 = abs(l1 - r1)
-    gap2 = abs(l2 - r2)
-    scale = max(1.0, abs(l1), abs(r1), abs(l2), abs(r2))
-
-    # gap 小到浮点噪声量级：两侧本来就一致，不判
-    if gap1 <= 1e-6 * scale:
+    # gap 必须**单调不增**（允许 10% 抖动）才可能是折点。
+    # 变大说明步长还没解析到函数尺度 —— 例如 cos(200000*x) 在默认步长
+    # 下 `[x0-h, x0+h]` 内振荡多次，那是采样不足，不是不可导。
+    monotone = all(gaps[i + 1] <= gaps[i] * 1.1
+                   for i in range(len(gaps) - 1))
+    if not monotone:
         return
 
-    # 步长缩到 1/4，gap 至少减半才算「随步长收敛」
-    if gap2 > 0.5 * gap1:
-        side = "left" if gap1 < 1e-30 else ""
+    # 跨 64 倍步长几乎不缩小 -> 收敛到非零常数 -> 折点。
+    #
+    # 门槛取 0.97（而非 0.5 / 0.8），只用来区分「常数」和「在收敛」：
+    #   |x|        比值 1.000  -> 拒绝
+    #   |x|^1.01   比值 0.959  -> 放行
+    #   |x|^1.05   比值 0.812  -> 放行
+    #   |x|^(4/3)  比值 0.250  -> 放行
+    # 可导函数的 gap 可以任意慢地趋于零，门槛越低误拒越多。
+    # 真正不可导时 gap 收敛到 |f'_+ - f'_-| > 0，比值等于 1。
+    if gaps[-1] > 0.97 * gaps[0]:
+        left, right = sample
         raise CalculusError(
             "Not differentiable at this point: the one-sided difference "
-            f"quotients do not converge to a common value "
-            f"({l1:+.6g} from the left, {r1:+.6g} from the right; "
-            f"the gap stays at {gap2:+.6g} when the step shrinks). "
-            "A symmetric difference is an average of the two sides, "
-            "not a derivative.")
+            f"quotients converge to different values "
+            f"({left:+.6g} from the left, {right:+.6g} from the right; "
+            f"their gap stays near {gaps[-1]:+.6g} while the step shrinks "
+            "by a factor of 64). A symmetric difference is an average of "
+            "the two sides, not a derivative.")
 
 
 # ---------------------------------------------------------------- 偏导
