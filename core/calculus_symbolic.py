@@ -588,25 +588,59 @@ def coefficient_list(poly, degree, point=0):
 
 
 def _localize_at_center(expr_s, symbol, center):
-    """在展开点邻域内按符号化简分段函数。
+    """按展开点把 Abs / sign / 实根的分支固定下来。
 
-    ``real_root(x, 3)`` 会被 sympy 展开成 ``Abs(x)**(1/3)*sign(x)``。
-    对它逐阶求导再求左右极限极慢 —— ``cbrt(x)`` 在 -1 处三阶展开时，
-    单是 k=1 的 ``sp.limit`` 就 30 秒没返回。
+    ``real_root(x, 3)`` 会展开成 ``Abs(x)**(1/3)*sign(x)``。对它逐阶求导
+    再求左右极限极慢 —— 不化简时 ``cbrt(x)`` 在 -1 的校验 30 秒都跑不完。
 
-    展开点不在 0 时，邻域内自变量的符号是固定的，可以先 ``refine`` 成
-    分支明确的表达式：``-1`` 附近是 ``-(-x)**(1/3)``，``1`` 附近是
-    ``x**(1/3)``。化简后求导和极限都是毫秒级。
+    关键在于**要看 Abs/sign 内部那个表达式的符号**，而不是自变量本身的
+    符号。``cbrt(x-1)`` 在 0 附近展开时，自变量 x 在 0 两侧都取得到，
+    但 ``x-1`` 始终是负的；只看 x 的符号既推不出结论，也会漏掉
+    ``cbrt(x-2)`` 在 1 这类平移输入。
 
-    ``center == 0`` 时刻意**不动**：那里两边符号不同，正是真折点，
-    必须保留原来的 Abs/sign 让检查能发现它。
+    对每个 ``Abs(arg)`` / ``sign(arg)``：
+      * arg 在展开点取正值 -> 加 Q.positive(arg)
+      * arg 在展开点取负值 -> 加 Q.negative(arg)
+      * arg 在展开点为 0   -> **不加**，那是真折点，必须保留双侧检查
     """
-    if center == 0:
-        return expr_s
     sp = _require()
-    condition = sp.Q.positive(symbol) if center > 0 else sp.Q.negative(symbol)
+
+    conditions = []
     try:
-        refined = sp.refine(expr_s, condition)
+        nodes = list(sp.preorder_traversal(expr_s))
+    except Exception:                            # noqa: BLE001
+        return expr_s
+
+    for node in nodes:
+        is_abs = isinstance(node, sp.Abs)
+        is_sign = isinstance(node, sp.sign)
+        if not (is_abs or is_sign) or not getattr(node, "args", None):
+            continue
+        argument = node.args[0]
+        if symbol not in argument.free_symbols:
+            continue
+        try:
+            at_center = argument.subs(symbol, center)
+            if at_center.has(sp.zoo, sp.nan) or at_center.is_finite is False:
+                continue
+            value = complex(at_center)
+        except Exception:                        # noqa: BLE001
+            continue
+        if abs(value.imag) > 1e-12:
+            continue
+        real = value.real
+        scale = 1e-12 * max(1.0, abs(real))
+        if real > scale:
+            conditions.append(sp.Q.positive(argument))
+        elif real < -scale:
+            conditions.append(sp.Q.negative(argument))
+        # real ≈ 0：展开点正好落在分支切换处，不化简
+
+    if not conditions:
+        return expr_s
+
+    try:
+        refined = sp.refine(expr_s, sp.And(*conditions))
     except Exception:                            # noqa: BLE001
         return expr_s
     if refined is None or refined.has(sp.zoo, sp.nan):

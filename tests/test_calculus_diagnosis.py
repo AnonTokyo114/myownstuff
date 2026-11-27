@@ -352,6 +352,65 @@ class TestCubeRootTaylorAtNegativePoints(unittest.TestCase):
             taylor_poly("cbrt(x)", point=0, order=2)
 
 
+class TestShiftedCubeRootTaylor(unittest.TestCase):
+    """平移后的实立方根 Taylor 展开也要及时返回。
+
+    分支局部化必须看 Abs/sign **内部表达式**的符号，不能只看自变量。
+    cbrt(x-1) 在 0 展开时自变量可正可负，但 x-1 恒为负；
+    cbrt(x-2) 在 1 展开时知道 x>0 也推不出 x-2 的符号。
+
+    这两类输入原来都会在校验阶段挂住（8 秒以上不返回）。
+    """
+
+    def _poly(self, expr, point, order):
+        from core.calculus_symbolic import taylor_poly
+        poly, _warnings = taylor_poly(expr, point=point, order=order)
+        return poly
+
+    def test_shifted_at_zero_completes(self):
+        """cbrt(x-1) 在 0：默认的 Maclaurin 输入框会遇到这种形态。"""
+        import time
+        start = time.perf_counter()
+        self._poly("cbrt(x-1)", 0, 3)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 10.0,
+                        f"cbrt(x-1) 在 0 的展开用了 {elapsed:.1f} 秒")
+
+    def test_shifted_at_zero_matches_analytic(self):
+        """-1 + x/3 + x^2/9 + 5*x^3/81。"""
+        import sympy as sp
+        poly = self._poly("cbrt(x-1)", 0, 3)
+        x = poly.free_symbols.pop()
+        expected = -1 + x / 3 + x ** 2 / 9 + 5 * x ** 3 / 81
+        self.assertEqual(sp.expand(poly) - sp.expand(expected), 0)
+
+    def test_shifted_away_from_zero(self):
+        """cbrt(x-2) 在 1 展开约 42 ms；以前 8 秒都不返回。"""
+        import sympy as sp
+        import time
+        start = time.perf_counter()
+        poly = self._poly("cbrt(x-2)", 1, 3)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 10.0)
+        x = poly.free_symbols.pop()
+        expected = (-1 + (x - 1) / 3 + (x - 1) ** 2 / 9
+                    + 5 * (x - 1) ** 3 / 81)
+        self.assertEqual(sp.expand(poly) - sp.expand(expected), 0)
+
+    def test_other_shifts(self):
+        """cbrt(x+2) 在 -1、cbrt(2x) 在 -1 这些控制点。"""
+        for expr, point in (("cbrt(x+2)", -1), ("cbrt(2*x)", -1)):
+            with self.subTest(expr=expr):
+                poly = self._poly(expr, point, 3)
+                self.assertIsNotNone(poly)
+
+    def test_cusp_still_rejected_after_shift(self):
+        """分支在展开点恰好切换时不能化简，必须拒绝。"""
+        from core.calculus_symbolic import SymbolicError, taylor_poly
+        with self.assertRaises(SymbolicError):
+            taylor_poly("cbrt(x-1)", point=1, order=2)
+
+
 class TestSourceEncodingIsIntact(unittest.TestCase):
     """直接检查源文件里没有 mojibake。
 
