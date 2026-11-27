@@ -543,6 +543,10 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
     vignetted. RMS is given both about the centroid and about the chief ray.
     """
     field_deg = float(field_deg)
+    if int(n_pupil) < 1:
+        raise ValueError(
+            f'n_pupil must be at least 1, got {n_pupil!r}. Use 1 for a '
+            f'single axial ray, or a larger count to sample the pupil.')
     if image_gap is None:
         system, zz = surfaces, z
     else:
@@ -630,6 +634,11 @@ def best_focus(surfaces, z, field_deg=0.0, gap_range=None, n_scan=21, n_pupil=9)
     candidate spacing the system is re-validated and re-traced.
     """
     base_gap = float(surfaces[-2].t)
+    if int(n_scan) < 3:
+        raise ValueError(
+            f'n_scan must be at least 3 to bracket a minimum, got '
+            f'{n_scan!r}. Raise it (21 is the default) or pass an explicit '
+            f'gap_range to narrow the search.')
     if gap_range is None:
         lo = max(1e-3, base_gap * 0.55)
         hi = base_gap * 1.55

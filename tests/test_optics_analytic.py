@@ -411,5 +411,86 @@ class TestSingleRayFocusAndEvenSampling(unittest.TestCase):
                 self.assertAlmostEqual(prof["chief"], expected, delta=1e-9)
 
 
+class TestInvalidSamplingArguments(unittest.TestCase):
+    """采样参数写错时要报错，不能静默给一个看似正常的结果。
+
+    自测发现：n_pupil=0 和 -1 走了 n_pupil<2 的"单光线"分支，
+    静默当成 1 条轴上光线；n_scan=0 被 max(3, n_scan) 悄悄改成 3。
+    参数错时给明确错误更好。
+    """
+
+    @staticmethod
+    def _defaults():
+        from core import optics as o
+        from ui.pages.ray_page import DEFAULTS
+        surfaces = []
+        for name, R, t, n, semi in DEFAULTS:
+            surfaces.append(o.Surface(
+                name,
+                float("inf") if R in ("inf", "") else float(R),
+                float(t), float(n),
+                None if semi in ("", None) else float(semi)))
+        z, acc = [], 0.0
+        for surf in surfaces:
+            z.append(acc)
+            acc += surf.t
+        return surfaces, z
+
+    def test_zero_pupil_samples_rejected(self):
+        from core import optics as o
+        surfaces, z = self._defaults()
+        for n_pupil in (0, -1, -100):
+            with self.subTest(n_pupil=n_pupil):
+                with self.assertRaises(ValueError):
+                    o.spot_analysis(surfaces, z, 0.0, n_pupil=n_pupil,
+                                    image_gap=38.925)
+
+    def test_one_pupil_sample_allowed(self):
+        """n_pupil=1 是合法的：单条轴上光线。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        prof = o.spot_analysis(surfaces, z, 0.0, n_pupil=1,
+                               image_gap=38.925)
+        self.assertEqual(prof["n_reached"], 1)
+        self.assertAlmostEqual(prof["chief"], 0.0, places=12)
+
+    def test_small_n_scan_rejected(self):
+        from core import optics as o
+        surfaces, z = self._defaults()
+        for n_scan in (0, -5, 2):
+            with self.subTest(n_scan=n_scan):
+                with self.assertRaises(ValueError):
+                    o.best_focus(surfaces, z, field_deg=0.0, n_scan=n_scan,
+                                 n_pupil=9)
+
+    def test_minimum_n_scan_still_works(self):
+        """n_scan=3 是能夹住极小值的最小值，必须能用。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        result = o.best_focus(surfaces, z, field_deg=0.0, n_scan=3,
+                              n_pupil=9)
+        self.assertAlmostEqual(result["best_gap"], 38.925, delta=0.3)
+
+    def test_error_messages_are_actionable(self):
+        """错误信息要说明怎么改，而不是只说不合法。"""
+        from core import optics as o
+        surfaces, z = self._defaults()
+        try:
+            o.spot_analysis(surfaces, z, 0.0, n_pupil=0, image_gap=38.925)
+        except ValueError as exc:
+            self.assertIn("n_pupil", str(exc))
+            self.assertIn("1", str(exc))
+        else:
+            self.fail("n_pupil=0 should raise")
+
+        try:
+            o.best_focus(surfaces, z, field_deg=0.0, n_scan=0, n_pupil=9)
+        except ValueError as exc:
+            self.assertIn("n_scan", str(exc))
+            self.assertIn("3", str(exc))
+        else:
+            self.fail("n_scan=0 should raise")
+
+
 if __name__ == "__main__":
     unittest.main()
