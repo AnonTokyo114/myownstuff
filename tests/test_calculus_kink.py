@@ -38,7 +38,8 @@ class TestNonDifferentiablePoints(unittest.TestCase):
         with self.assertRaises(CalculusError) as ctx:
             derivative("abs(x)", 0.0)
         message = str(ctx.exception)
-        self.assertIn("one-sided", message)
+        # 消息会随实现变化，只钉住语义：说明左右差商不同、对称差不是导数
+        self.assertIn("difference quotient", message)
         self.assertIn("not a derivative", message)
 
     def test_abs_at_zero_second_order(self):
@@ -203,6 +204,85 @@ class TestGapBehaviour(unittest.TestCase):
         self.assertGreater(gaps[1], gaps[2])
         # 步长从 1e-3 降到 1e-5（100 倍），gap 只降到 100^(-1/3) ≈ 0.215
         self.assertAlmostEqual(gaps[2] / gaps[0], 100 ** (-1 / 3), places=2)
+
+
+class TestCuspWithSmoothBackground(unittest.TestCase):
+    """尖点叠加平滑背景后仍然不可导。
+
+    这是纯数值判据最难看出来的形态：gap = 2 + 20000h，在有限尺度上
+    明显下降（跨 64 倍比值 0.803），看起来像在收敛，其实趋于 2。
+    之前把门槛从 0.5 提到 0.97 都能通过，说明**任何固定比值都不可靠**。
+
+    现在由符号层给结论：左右差商极限分别是 -1 和 +1。
+    """
+
+    def test_cusp_plus_quadratic(self):
+        with self.assertRaises(CalculusError):
+            derivative("abs(x)+10000*x^2", 0.0)
+
+    def test_cusp_plus_quadratic_and_linear(self):
+        """再加线性项也不影响结论（左右导数 0 和 2）。"""
+        with self.assertRaises(CalculusError):
+            derivative("abs(x)+10000*x^2+x", 0.0)
+
+    def test_partial_with_quadratic_background(self):
+        with self.assertRaises(CalculusError):
+            partial_derivative("abs(x)+10000*x^2+y", ["x", "y"],
+                               {"x": 0.0, "y": 1.0}, "x")
+
+
+class TestSmoothButLocallyNarrow(unittest.TestCase):
+    """光滑但局部尺度极小的函数不能被误判成折点。
+
+    sqrt(x^2+1e-16) 在全实轴光滑，f'(x) = x/sqrt(x^2+1e-16)，
+    所以 f'(0) = 0。四个采样步长都还没解析出这个圆滑尖部的宽度，
+    gap 的末/首比是 0.9751 —— 超过 0.97 就被误拒了。
+    """
+
+    def test_smooth_sqrt(self):
+        value, _err = derivative("sqrt(x^2+1e-16)", 0.0)
+        self.assertAlmostEqual(float(value), 0.0, places=4)
+
+    def test_very_slow_fractional_power(self):
+        """abs(x)^1.001：跨 64 倍 gap 只降到 0.9958，仍可导。"""
+        value, _err = derivative("abs(x)^1.001", 0.0)
+        self.assertAlmostEqual(float(value), 0.0, places=4)
+
+
+class TestSymbolicDiagnosis(unittest.TestCase):
+    """符号层本身的行为也要钉住。"""
+
+    def test_verdicts(self):
+        from core.calculus_numeric import symbolic_differentiable as sd
+        cases = [
+            ("abs(x)", 0.0, 1, False),
+            ("abs(x)", 0.0, 2, False),
+            ("abs(x)+10000*x^2", 0.0, 1, False),
+            ("x*abs(x)", 0.0, 1, True),
+            ("x*abs(x)", 0.0, 2, False),
+            ("sqrt(x^2+1e-16)", 0.0, 1, True),
+            ("abs(x)^1.001", 0.0, 1, True),
+            ("x**2", 3.0, 1, True),
+            ("sin(x)", 0.0, 1, True),
+            ("abs(x)", 2.0, 1, True),
+        ]
+        for expr, x0, order, want in cases:
+            with self.subTest(expr=expr, x0=x0, order=order):
+                self.assertIs(sd(expr, x0, order), want)
+
+    def test_unknown_for_unparseable(self):
+        """转不成 sympy 时应返回 None，而不是瞎猜。"""
+        from core.calculus_numeric import symbolic_differentiable as sd
+        self.assertIsNone(sd("this is not an expression", 0.0))
+
+    def test_symbol_substitution_is_not_silent(self):
+        """回归：Symbol('x') 和 Symbol('x', real=True) 是两个对象。
+
+        拿后者去 subs 会静默不替换，左右极限都算成 0，
+        于是 abs(x) 被误判成可导。这里直接钉住 abs 的判定。
+        """
+        from core.calculus_numeric import symbolic_differentiable as sd
+        self.assertIs(sd("abs(x)", 0.0, 1), False)
 
 
 class TestSymmetricZeroIsNotProof(unittest.TestCase):
