@@ -1,10 +1,19 @@
-"""不可导点的导数不能被报成零。
+"""不可导点的导数不能被报成一个看起来确定的数。
 
-中心差分对折点**恒为零**：``|x|`` 在 0 处 ``f(+h) - f(-h)`` 永远是 0，
-Richardson 外推也只会得到 0 和零误差。所以「导数 0、误差 0」这个组合
-本身不能证明可导 —— 必须另查单侧差商。
+这组用例来自两轮独立审查，每一轮的发现都对应真实 GUI 上的错误显示：
 
-这些用例都对应真实 GUI 上会显示的结果。
+第一轮（原始 bug）
+  中心差分对折点**恒为零**：``|x|`` 在 0 处 ``f(+h) - f(-h)`` 永远是 0，
+  Richardson 外推也只会给出 0 和零误差，界面显示「导数 0，误差 0」。
+
+第二轮（上一版修复引入的回归 + 漏判）
+  用固定步长比较左右差商会把**光滑极值**误判成折点
+  （``1000*x**2`` 在 0 处左右差商是 ∓2000h，差 0.05）；
+  而要求「中心差分为零」又会让 ``abs(x)+x`` 整条跳过；
+  固定阈值还会漏掉 ``0.001*abs(x)``。
+
+现在的判据看的是**左右差商之差随步长是否收敛**：光滑时它 ∝ h，
+折点时它趋于非零常数。下面的用例把这两类都钉住了。
 """
 
 from __future__ import annotations
@@ -22,8 +31,9 @@ from core.calculus_numeric import (  # noqa: E402
 
 
 class TestNonDifferentiablePoints(unittest.TestCase):
-    """必须拒绝，而不是给一个看起来很确定的 0。"""
+    """必须拒绝，而不是给一个看起来很确定的数。"""
 
+    # ---- 原始反例 ---------------------------------------------------
     def test_abs_at_zero_first_order(self):
         with self.assertRaises(CalculusError) as ctx:
             derivative("abs(x)", 0.0)
@@ -32,7 +42,11 @@ class TestNonDifferentiablePoints(unittest.TestCase):
         self.assertIn("not a derivative", message)
 
     def test_abs_at_zero_second_order(self):
-        """二阶导的前提是一阶导存在。"""
+        """二阶导的前提是一阶导存在。
+
+        |x| 在 0 处的二阶单侧差商两边都恰好是 0（折点对称抵消），
+        所以只查二阶会漏掉 —— 必须一阶也查。
+        """
         with self.assertRaises(CalculusError):
             derivative("abs(x)", 0.0, order=2)
 
@@ -45,9 +59,27 @@ class TestNonDifferentiablePoints(unittest.TestCase):
             partial_derivative("abs(x)+y", ["x", "y"],
                                {"x": 0.0, "y": 1.0}, "x")
 
+    # ---- 第二轮补上的漏判 -------------------------------------------
+    def test_cusp_with_linear_term(self):
+        """abs(x)+x：中心差分是 1（不为零），旧判据整条跳过。"""
+        with self.assertRaises(CalculusError):
+            derivative("abs(x)+x", 0.0)
+
+    def test_scaled_cusp(self):
+        """0.001*abs(x)：左右差商只差 0.002，旧阈值判不出来。"""
+        with self.assertRaises(CalculusError):
+            derivative("0.001*abs(x)", 0.0)
+
+    def test_first_order_differentiable_second_not(self):
+        """x*abs(x)：一阶可导（导数 0），二阶不可导（两侧 -2 / +2）。"""
+        value, _err = derivative("x*abs(x)", 0.0)
+        self.assertAlmostEqual(float(value), 0.0, places=4)
+        with self.assertRaises(CalculusError):
+            derivative("x*abs(x)", 0.0, order=2)
+
 
 class TestDifferentiableStillWorks(unittest.TestCase):
-    """折点检查不能误伤——包括「导数在 0 恰好是 0」的常见情况。"""
+    """不能因为「导数不连续」就误拒可导函数。"""
 
     def _value(self, expr, x0, order=1):
         value, _err = derivative(expr, x0, order=order)
@@ -59,6 +91,20 @@ class TestDifferentiableStillWorks(unittest.TestCase):
         self.assertAlmostEqual(self._value("sin(x)", 0.0, order=2), 0.0,
                                places=4)
 
+    def test_steep_quadratic_at_extremum(self):
+        """上一版把 1000*x**2 在 0 误判成不可导 —— 那只是二阶导在起作用。"""
+        self.assertAlmostEqual(self._value("1000*x**2", 0.0), 0.0, places=4)
+        self.assertAlmostEqual(self._value("1000*x**2", 0.0, order=2),
+                               2000.0, delta=20.0)
+
+    def test_narrow_gaussian_at_peak(self):
+        """exp(-1000*x**2) 在 0，上一版也被误拒。"""
+        self.assertAlmostEqual(self._value("exp(-1000*x**2)", 0.0), 0.0,
+                               places=4)
+
+    def test_large_scale_quadratic(self):
+        self.assertAlmostEqual(self._value("100000*x**2", 0.0), 0.0, places=2)
+
     def test_ordinary_points(self):
         self.assertAlmostEqual(self._value("x**2", 3.0), 6.0, places=4)
         self.assertAlmostEqual(self._value("sin(x)", 0.0), 1.0, places=6)
@@ -67,7 +113,6 @@ class TestDifferentiableStillWorks(unittest.TestCase):
                                places=3)
 
     def test_steep_function_not_rejected(self):
-        """导数很大时两侧差商的相对差很小，不该被判成折点。"""
         self.assertAlmostEqual(self._value("exp(100*x)", 0.0), 100.0,
                                delta=5.0)
 
@@ -90,11 +135,32 @@ class TestSymmetricZeroIsNotProof(unittest.TestCase):
         h = 1e-4
         symmetric = (f(0.0 + h) - f(0.0 - h)) / (2 * h)
         self.assertEqual(symmetric, 0.0)
-        # 但左右差商分别是 -1、+1
         left = (f(0.0) - f(0.0 - h)) / h
         right = (f(0.0 + h) - f(0.0)) / h
         self.assertAlmostEqual(left, -1.0)
         self.assertAlmostEqual(right, 1.0)
+
+    def test_gap_shrinks_for_smooth_functions(self):
+        """判据的基础：光滑函数的左右差商之差随步长缩小。"""
+        f = lambda t: 1000.0 * t * t   # noqa: E731
+        for h in (1e-4, 1e-5):
+            left = (f(0.0) - f(-h)) / h
+            right = (f(h) - f(0.0)) / h
+            gap = abs(left - right)
+            self.assertAlmostEqual(gap / (2 * 1000.0 * h), 1.0, places=6)
+        # 步长缩小 10 倍，gap 也缩小约 10 倍
+        g1 = abs((f(0.0) - f(-1e-4)) / 1e-4 - (f(1e-4) - f(0.0)) / 1e-4)
+        g2 = abs((f(0.0) - f(-1e-5)) / 1e-5 - (f(1e-5) - f(0.0)) / 1e-5)
+        self.assertAlmostEqual(g2 / g1, 0.1, places=6)
+
+    def test_gap_stays_for_cusp(self):
+        """折点的左右差商之差不随步长缩小。"""
+        f = abs
+        g1 = abs((f(0.0) - f(-1e-4)) / 1e-4 - (f(1e-4) - f(0.0)) / 1e-4)
+        g2 = abs((f(0.0) - f(-1e-5)) / 1e-5 - (f(1e-5) - f(0.0)) / 1e-5)
+        self.assertAlmostEqual(g1, 2.0, places=6)
+        self.assertAlmostEqual(g2, 2.0, places=6)
+        self.assertAlmostEqual(g2 / g1, 1.0, places=6)
 
     def test_derivative_rejects_instead_of_returning_zero(self):
         try:

@@ -258,7 +258,7 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
         rich = (4 * d2 - d1) / 3
         err = abs(d3 - d2)
         # 中心差分看不出折点（|x| 在 0 恒为 0），补一次单侧差商检查
-        _kink_check(f, x0, h0 / 4, rich)
+        _kink_check(f, x0, h0 / 4, 1)
     else:
         # 二阶差分误差是 O(h^2)，外推系数同为一阶
         rich = (4 * d2 - d1) / 3
@@ -266,50 +266,68 @@ def derivative(expr, x0, order=1, x_name="x", h=None):
         # 二阶导存在的前提是一阶导存在：对**一阶**中心差分做折点检查。
         # |x| 在 0 的二阶差分本身会给出 2/h 这种巨大值，不是 0，
         # 所以不能直接拿 rich 去套一阶的判据。
-        # 注意不能写 estimate(h0/4)：order==2 时它返回的是**二阶**差分，
-        # 而这里要的是「一阶导存不存在」
-        first_central, _second = _central_diff(f, x0, h0 / 4)
-        _kink_check(f, x0, h0 / 4, first_central)
+        # 二阶导存在的前提是一阶导存在。必须**先**查一阶：
+        # |x| 在 0 处的二阶单侧差商两边都恰好是 0（折点对称抵消），
+        # 只看二阶会漏掉；而 x*abs(x) 一阶可导、二阶不可导，只有二阶查得出来。
+        _kink_check(f, x0, h0 / 4, 1)
+        _kink_check(f, x0, h0 / 4, 2)
     if not np.isfinite(abs(rich)):
         raise CalculusError("Derivative is invalid (not differentiable here, or the function diverges)")
     return _realify(rich), float(abs(err))
-def _one_sided(f, x0, step, sign):
-    """单侧差商：sign=+1 取右侧（前向），-1 取左侧（后向）。"""
-    if sign > 0:
-        return (f(x0 + step) - f(x0)) / step
-    return (f(x0) - f(x0 - step)) / step
+def _sided_quotients(f, x0, step, order):
+    """返回 (左侧, 右侧) 的单侧差商。
+
+    order=1 用前向/后向一阶差商；order=2 用三点的二阶单侧差商。
+    """
+    if order == 1:
+        right = (f(x0 + step) - f(x0)) / step
+        left = (f(x0) - f(x0 - step)) / step
+    else:
+        right = (f(x0 + 2 * step) - 2 * f(x0 + step) + f(x0)) / (step * step)
+        left = (f(x0) - 2 * f(x0 - step) + f(x0 - 2 * step)) / (step * step)
+    return left, right
 
 
-def _kink_check(f, x0, step, symmetric_value, *, atol=1e-9, rtol=1e-2):
-    """中心差分说「导数≈0」，但两侧差商明显不一致时，判为不可导。
+def _kink_check(f, x0, step, order):
+    """判断 x0 处 order 阶导数是否真的存在。
 
-    为什么需要这一步：对称中心差分对折点**恒为零**。``|x|`` 在 0 处
-    ``f(+h) - f(-h)`` 永远是 0，Richardson 外推也只会得到 0 和零误差，
-    于是界面显示「导数 0，误差 0」—— 而真实情况是左右导数分别为 -1、+1，
-    导数不存在。
+    核心思路：**看左右差商之差随步长缩小的行为**。
 
-    判据故意保守：只在**中心差分为零**且**两侧差商相差很大**时才拒绝。
-    这样
-      * ``|x|`` 在 0   -> 触发（两侧 -1 / +1）
-      * ``x**2`` 在 0  -> 不触发（两侧差商都是 O(h)，差值 ~h）
-      * ``exp(100x)``  -> 不触发（中心差分不是 0）
-    可导但导数振荡的函数不会因为「导数不连续」被误拒。
+      * 光滑函数：两边都收敛到同一个导数，gap(h) ~ C*h，
+        步长缩到 1/4，gap 也缩到约 1/4。
+      * 折点：两边分别收敛到 f'_+ 和 f'_-，gap(h) -> |f'_+ - f'_-|，
+        是个**非零常数**，步长再小也不缩。
+
+    对固定步长比较左右差商是错的：光滑极值附近左右差商本来就不同
+    （1000*x**2 在 0 处是 ∓2000h 量级），那不是折点，那是二阶导。
+
+    只有 gap 明显不随步长收敛时才拒绝。取不到值（越界、求值失败）就
+    放弃判断，交给调用方按原逻辑处理。
     """
     try:
-        left = _one_sided(f, x0, step, -1)
-        right = _one_sided(f, x0, step, +1)
+        l1, r1 = _sided_quotients(f, x0, step, order)
+        l2, r2 = _sided_quotients(f, x0, step / 4.0, order)
     except Exception:                            # noqa: BLE001
-        return                                       # 取不到就差商就不再判断
+        return
 
-    reference = max(1.0, abs(symmetric_value), abs(left), abs(right))
-    if (abs(symmetric_value) < atol * reference
-            and abs(left - right) > rtol * reference):
+    gap1 = abs(l1 - r1)
+    gap2 = abs(l2 - r2)
+    scale = max(1.0, abs(l1), abs(r1), abs(l2), abs(r2))
+
+    # gap 小到浮点噪声量级：两侧本来就一致，不判
+    if gap1 <= 1e-6 * scale:
+        return
+
+    # 步长缩到 1/4，gap 至少减半才算「随步长收敛」
+    if gap2 > 0.5 * gap1:
+        side = "left" if gap1 < 1e-30 else ""
         raise CalculusError(
             "Not differentiable at this point: the one-sided difference "
-            f"quotients disagree ({left:+.6g} from the left, "
-            f"{right:+.6g} from the right) while the symmetric difference "
-            "is zero. A symmetric difference is an average of the two "
-            "sides, not a derivative.")
+            f"quotients do not converge to a common value "
+            f"({l1:+.6g} from the left, {r1:+.6g} from the right; "
+            f"the gap stays at {gap2:+.6g} when the step shrinks). "
+            "A symmetric difference is an average of the two sides, "
+            "not a derivative.")
 
 
 # ---------------------------------------------------------------- 偏导
@@ -344,8 +362,7 @@ def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
         d1, d2 = val(h), val(h / 2)
         rich = (4 * d2 - d1) / 3
         # 同一族问题：abs(x)+y 在原点的偏导也是对称差分的零点
-        _kink_check(lambda t, _v=var, _p=point: f(**{**{_v: t}}), 
-                    point[var], h / 4, rich)
+        _kink_check(lambda t, _v=var: f(**{_v: t}), point[var], h / 4, 1)
         return _realify(rich), float(abs(val(h / 4) - d2))
 
     if order == 2 and cross_var is None:
@@ -356,6 +373,9 @@ def partial_derivative(expr, variables, point, var, order=1, cross_var=None):
 
         d1, d2 = val2(h), val2(h / 2)
         rich = (4 * d2 - d1) / 3
+        # 二阶偏导同样：先查一阶存在，再查二阶收敛
+        _kink_check(lambda t, _v=var: f(**{_v: t}), point[var], h / 4, 1)
+        _kink_check(lambda t, _v=var: f(**{_v: t}), point[var], h / 4, 2)
         return _realify(rich), float(abs(val2(h / 4) - d2))
 
     if order == 2 and cross_var is not None:

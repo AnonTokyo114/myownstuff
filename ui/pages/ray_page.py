@@ -353,15 +353,27 @@ class RayPage(QWidget):
     # ================================================================ 摘要
     def _update_summary(self, surfaces, z, fp, rays) -> None:
         parts = []
+        # efl 是**约化**焦距 -1/C（单位折射率下的焦距），不是像方焦距。
+        # 介质不同时两者不等，必须标出来，否则单球面 1->1.5 会显示
+        # EFL=100 而实际像方焦距是 150。
         efl = fp.get("efl")
         bfl = fp.get("bfl")
         ffl = fp.get("ffl")
+        f_front = fp.get("f_front")
+        f_back = fp.get("f_back")
+        n_in = fp.get("n_in")
+        n_out = fp.get("n_out")
         if efl is not None:
-            parts.append(f"EFL = {efl:.4f} mm")
+            parts.append(f"reduced focal length = {efl:.4f} mm")
+        if f_front is not None and f_back is not None:
+            parts.append(f"f_front = {f_front:.4f} mm / "
+                         f"f_back = {f_back:.4f} mm")
         if bfl is not None:
             parts.append(f"BFL = {bfl:.4f} mm")
         if ffl is not None:
             parts.append(f"FFL = {ffl:.4f} mm")
+        if n_in is not None and n_out is not None:
+            parts.append(f"n_in = {n_in:g} / n_out = {n_out:g}")
         hf, hb = fp.get("h_front"), fp.get("h_back")
         if hf is not None and hb is not None:
             parts.append(f"principal planes  front {hf:.3f} / rear {hb:.3f} mm")
