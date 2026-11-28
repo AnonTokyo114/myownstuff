@@ -138,6 +138,67 @@ class TestApertureChecking(unittest.TestCase):
         self.assertIn(result["blocked_at"], (None, "small"))
 
 
+class TestTracePath(unittest.TestCase):
+    """追迹路径必须包含每片透镜处的折转点。
+
+    重构时曾只在进入循环前和循环后记录端点，中间的顶点全部丢失 ——
+    y_image 仍然正确，但绘图把两片透镜之间连成一条斜线，
+    第二片处被挡的光线也画不出停止位置。终点检查发现不了这个。
+    """
+
+    def test_four_f_has_a_vertex_at_each_lens(self):
+        f = 100.0
+        system = thin.ThinSystem(
+            f,
+            [thin.LensSpec("L1", f, 12.5, distance_to_next=2 * f),
+             thin.LensSpec("L2", f, 12.5, distance_to_next=f)])
+        result = thin.trace(system, 0.0, 0.05)
+        expected = [(0.0, 0.0), (100.0, 5.0), (300.0, 5.0), (400.0, 0.0)]
+        self.assertEqual(len(result["path"]), len(expected))
+        for got, want in zip(result["path"], expected):
+            self.assertAlmostEqual(got[0], want[0], places=9)
+            self.assertAlmostEqual(got[1], want[1], places=9)
+
+    def test_collimated_section_is_flat(self):
+        """4f 中两片透镜之间应是平行光：同一 y。"""
+        f = 100.0
+        system = thin.ThinSystem(
+            f,
+            [thin.LensSpec("L1", f, 12.5, distance_to_next=2 * f),
+             thin.LensSpec("L2", f, 12.5, distance_to_next=f)])
+        path = thin.trace(system, 0.0, 0.05)["path"]
+        self.assertAlmostEqual(path[1][1], path[2][1], places=12)
+
+    def test_blocked_ray_path_ends_at_stop(self):
+        """被挡光线的 path[-1] 必须等于报告出来的停止坐标。"""
+        system = thin.ThinSystem(
+            float("inf"),
+            [thin.LensSpec("L1", 100.0, 10.0, distance_to_next=50.0),
+             thin.LensSpec("L2", 100.0, 2.0)])
+        result = thin.trace(system, 8.0, 0.0)
+        self.assertEqual(result["blocked_at"], "L2")
+        self.assertAlmostEqual(result["path"][-1][0], 50.0, places=9)
+        self.assertAlmostEqual(result["path"][-1][1], 4.0, places=9)
+
+    def test_single_lens_path_has_lens_vertex(self):
+        system = thin.ThinSystem(300.0, [thin.LensSpec("L", 100.0, 12.5)])
+        path = thin.trace(system, 0.0, 0.01)["path"]
+        self.assertEqual(len(path), 3)
+        self.assertAlmostEqual(path[1][0], 300.0, places=9)
+        self.assertAlmostEqual(path[2][0], 450.0, places=9)
+
+    def test_sample_rays_paths_are_complete(self):
+        """sample_rays 返回的光线也要带完整路径。"""
+        system = thin.ThinSystem(
+            100.0,
+            [thin.LensSpec("L1", 100.0, 12.5, distance_to_next=200.0),
+             thin.LensSpec("L2", 100.0, 12.5, distance_to_next=100.0)])
+        profile = thin.sample_rays(system, n_rays=9)
+        for ray in profile["rays"]:
+            if ray["blocked_at"] is None:
+                self.assertGreaterEqual(len(ray["path"]), 4)
+
+
 class TestGeometricSpot(unittest.TestCase):
     def test_spot_rms_is_zero_at_focus(self):
         """理想薄透镜没有像差，轴上光斑在焦面上是严格点。"""

@@ -319,14 +319,15 @@ class ThinLensPage(QWidget):
         if profile is not None:
             for ray in profile["rays"]:
                 path = ray["path"]
-                if len(path) < 2:
-                    continue
                 blocked = ray["blocked_at"] is not None
-                ax.plot([p[0] for p in path], [p[1] for p in path],
-                        color="#c0392b" if not blocked else "#b3261e",
-                        linewidth=0.8, alpha=0.7,
-                        linestyle="-" if not blocked else ":")
-                if blocked:
+                if len(path) >= 2:
+                    ax.plot([p[0] for p in path], [p[1] for p in path],
+                            color="#c0392b" if not blocked else "#b3261e",
+                            linewidth=0.8, alpha=0.7,
+                            linestyle="-" if not blocked else ":")
+                # 叉号和"有没有线段可画"是两件事：第一片就被挡的光线
+                # path 只有起点，仍然要标出它停在哪个口径上。
+                if blocked and path:
                     ax.plot([path[-1][0]], [path[-1][1]], marker="x",
                             color="#b3261e", markersize=5)
 

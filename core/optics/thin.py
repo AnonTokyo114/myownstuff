@@ -212,6 +212,12 @@ def trace(system: ThinSystem, entry: float, theta: float,
     last = len(system.lenses) - 1
     for index, lens in enumerate(system.lenses):
         z = positions[index]
+        # 第一片已经作为 path 的最后一个点存在（有限物是
+        # (object_distance, y)，无穷远是 (0, y)），不要重复；
+        # 其余每片都要在折射和口径判断**之前**记下来，这样
+        # 轨迹有完整的折转点，被挡时的 path[-1] 就是停止坐标。
+        if index > 0:
+            path.append((z, y))
         if lens.aperture is not None and abs(y) > lens.aperture + EPS:
             return {
                 "blocked_at": lens.label,
