@@ -77,38 +77,41 @@ class OpticsHubPage(QWidget):
         outer.addWidget(heading)
 
         intro = QLabel(
-            "三个互补的光学模型。每个在自己的窗口里运行，"
-            "互不影响；参数各自保留。")
+            "Three complementary optical models. Each runs in its own "
+            "window with its own parameters.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #5b6470;")
         outer.addWidget(intro)
 
         self.thin_card = ToolCard(
             "Paraxial / Thin Lens",
-            "理想薄透镜 · 近轴",
-            "输入：到下一片的距离、焦距、通光口径。\n"
-            "用途：快速核算成像位置、放大率、4f、中继、扩束。\n"
-            "忽略像差与衍射 —— 轴上光斑在焦面上严格为零。",
+            "Ideal thin lens - paraxial",
+            "Input: spacing to the next lens, focal length, clear aperture.\n"
+            "Use: quick image position, magnification, 4f, relay, beam expander.\n"
+            "No aberrations and no diffraction - the on-axis spot at focus "
+            "is exactly zero.",
             "Open thin lens",
         )
         outer.addWidget(self.thin_card)
 
         self.surface_card = ToolCard(
             "Surface Ray Tracer",
-            "球面 · 精确追迹",
-            "输入：曲率半径、厚度、折射率、口径。\n"
-            "用途：实际曲面设计，看球差、渐晕、最佳焦面。\n"
-            "几何光学，无衍射；像质是子午采样指标。",
+            "Spherical surfaces - exact tracing",
+            "Input: radius of curvature, thickness, index, clear aperture.\n"
+            "Use: real surface design, spherical aberration, vignetting, "
+            "best focus.\n"
+            "Geometric optics, no diffraction; image quality is a meridional "
+            "sampling metric.",
             "Open surface tracer",
         )
         outer.addWidget(self.surface_card)
 
         self.fourier_card = ToolCard(
             "Fourier Optics",
-            "复光场 · 衍射",
-            "输入：波长、采样网格、孔径与相位。\n"
-            "用途：实空间 / k 空间成像、空间滤波、PSF。\n"
-            "尚未实现 —— 需要新的复场传播内核。",
+            "Complex field - diffraction",
+            "Input: wavelength, sampling grid, aperture and phase.\n"
+            "Use: real-space / k-space imaging, spatial filtering, PSF.\n"
+            "Not implemented yet - needs a complex-field propagation core.",
             "Not available yet",
             enabled=False,
         )

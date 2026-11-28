@@ -64,29 +64,30 @@ class ThinSystem:
     # -- 校验 ----------------------------------------------------------
     def validate(self) -> None:
         if not self.lenses:
-            raise ValueError("至少需要一片透镜。")
+            raise ValueError("At least one lens is required.")
         if math.isnan(self.object_distance) or self.object_distance <= 0:
             raise ValueError(
-                f"object_distance 必须为正，得到 {self.object_distance!r}。"
-                f"物在无穷远时可以直接给 inf。")
+                f"object_distance must be positive, got "
+                f"{self.object_distance!r}. Use inf for an object at "
+                f"infinity.")
 
         last = len(self.lenses) - 1
         for index, lens in enumerate(self.lenses):
             if not np.isfinite(lens.focal) or lens.focal == 0.0:
                 raise ValueError(
-                    f"{lens.label}: focal 必须是有限的非零值，"
-                    f"得到 {lens.focal!r}。")
+                    f"{lens.label}: focal must be finite and non-zero, "
+                    f"got {lens.focal!r}.")
             if lens.aperture is not None:
                 if not np.isfinite(lens.aperture) or lens.aperture <= 0:
                     raise ValueError(
-                        f"{lens.label}: aperture 必须是有限正数或 None，"
-                        f"得到 {lens.aperture!r}。")
+                        f"{lens.label}: aperture must be a finite positive "
+                        f"number or None, got {lens.aperture!r}.")
             if index < last:
                 gap = lens.distance_to_next
                 if not np.isfinite(gap) or gap <= 0:
                     raise ValueError(
-                        f"{lens.label}: 到下一片的距离必须是有限正数，"
-                        f"得到 {gap!r}。")
+                        f"{lens.label}: spacing to the next lens must be a "
+                        f"finite positive number, got {gap!r}.")
 
     # -- 坐标 ----------------------------------------------------------
     @property
@@ -262,7 +263,7 @@ def entrance_radius(system: ThinSystem) -> float:
     for lens in system.lenses:
         if lens.aperture is not None:
             return float(lens.aperture)
-    raise ValueError("所有透镜都没有给 aperture，无法定义入口采样范围。")
+    raise ValueError("No lens has an aperture, so the entrance sampling range is undefined.")
 
 
 def sample_rays(system: ThinSystem, n_rays: int = 9,
@@ -277,7 +278,7 @@ def sample_rays(system: ThinSystem, n_rays: int = 9,
     """
     system.validate()
     if int(n_rays) < 1:
-        raise ValueError(f"n_rays 至少为 1，得到 {n_rays!r}。")
+        raise ValueError(f"n_rays must be at least 1, got {n_rays!r}.")
     if image_gap is None:
         image_gap = image_distance(system)
 
@@ -323,7 +324,7 @@ def sample_rays(system: ThinSystem, n_rays: int = 9,
         }
 
     if not reached:
-        raise ValueError("所有采样光线都被口径挡住。")
+        raise ValueError("All sampled rays were blocked by an aperture.")
     values = np.asarray([r["y_image"] for r in reached], dtype=float)
     return {
         "radius": radius,

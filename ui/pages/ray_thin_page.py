@@ -56,7 +56,7 @@ class ThinLensPage(QWidget):
         title.setStyleSheet("font-size: 17px; font-weight: 700;")
         outer.addWidget(title)
 
-        note = QLabel("理想近轴模型 —— 无像差、无衍射；焦面上光斑严格为零。")
+        note = QLabel("Ideal paraxial model - no aberrations, no diffraction; the on-axis spot at focus is exactly zero.")
         note.setStyleSheet("color: #5b6470;")
         outer.addWidget(note)
 
@@ -66,7 +66,8 @@ class ThinLensPage(QWidget):
         self.object_distance = QLineEdit("100")
         self.object_distance.setFixedWidth(110)
         self.object_distance.setToolTip(
-            "物面到第一片透镜的距离（mm）。物在无穷远时填 inf。")
+            "Object plane to the first lens, in mm. Use inf for an object "
+            "at infinity.")
         params.addWidget(self.object_distance)
         params.addWidget(QLabel("mm"))
 
@@ -183,7 +184,8 @@ class ThinLensPage(QWidget):
                 focal = float(cell(2))
             except ValueError as exc:
                 raise ValueError(
-                    f"第 {row + 1} 行的距离/焦距不是数字：{exc}") from exc
+                    f"Row {row + 1}: spacing/focal is not a number ({exc})."
+                ) from exc
             aperture_text = cell(3)
             aperture = float(aperture_text) if aperture_text else None
             lenses.append(thin.LensSpec(label, focal, aperture, distance))
@@ -196,8 +198,8 @@ class ThinLensPage(QWidget):
                 object_distance = float(text)
             except ValueError as exc:
                 raise ValueError(
-                    f"物距 {self.object_distance.text()!r} 不是数字，"
-                    f"也不是 inf。") from exc
+                    f"Object distance {self.object_distance.text()!r} is "
+                    f"neither a number nor inf.") from exc
         return thin.ThinSystem(object_distance, lenses)
 
     # ------------------------------------------------------------------
