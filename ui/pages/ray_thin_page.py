@@ -172,9 +172,9 @@ class ThinLensPage(QWidget):
         left_layout.addLayout(lens_rows)
 
         left_layout.addWidget(QLabel("Object points"))
-        self.fan_table = QTableWidget(3, 3)
+        self.fan_table = QTableWidget(3, 4)
         self.fan_table.setHorizontalHeaderLabels(
-            ["Point", "Height (mm)", "Centre angle (deg)"])
+            ["Point", "Height (mm)", "Centre angle (deg)", "Rays"])
         self.fan_table.verticalHeader().setVisible(False)
         self.fan_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
@@ -182,15 +182,11 @@ class ThinLensPage(QWidget):
         self.fan_table.setMinimumHeight(110)
         left_layout.addWidget(self.fan_table)
 
-        fan_rows = QHBoxLayout()
-        fan_rows.addWidget(QLabel("Rays per point"))
-        self.ray_count = QComboBox()
-        self.ray_count.addItems(["1", "3", "5"])
-        self.ray_count.setCurrentText(str(DEFAULT_RAY_COUNT))
-        self.ray_count.setFixedWidth(70)
-        fan_rows.addWidget(self.ray_count)
-        fan_rows.addStretch(1)
-        left_layout.addLayout(fan_rows)
+        hint = QLabel("Height is derived from Centre y and the "
+                      "two spacings; edit those above.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #5b6470; font-size: 11px;")
+        left_layout.addWidget(hint)
 
         left_layout.addStretch(1)
         splitter.addWidget(left)
@@ -224,14 +220,30 @@ class ThinLensPage(QWidget):
         self.centre_y.valueChanged.connect(self._on_layout_changed)
         self.d12.valueChanged.connect(self._on_d12)
         self.d23.valueChanged.connect(self._on_d23)
-        self.link_spacing.toggled.connect(lambda _c: self._on_layout_changed())
-        self.ray_count.currentIndexChanged.connect(lambda _i: self.recompute())
-        self.fan_table.itemChanged.connect(lambda _i: self.recompute())
+        self.link_spacing.toggled.connect(self._on_link_toggled)
+        self.fan_table.itemChanged.connect(self._on_fan_table_changed)
 
         apply_theme(self)
         self.load_defaults()
 
     # ------------------------------------------------------------------
+    def _on_link_toggled(self, checked: bool) -> None:
+        """勾选联动时把 d23 同步成 d12，再重建物点。
+
+        只切换复选框而不改数值，会留下"联动已开、间距却不等"的
+        矛盾状态 —— 之前就是这个行为。
+        """
+        if checked:
+            self._suspend_link = True
+            self.d23.setValue(self.d12.value())
+            self._suspend_link = False
+        self._on_layout_changed()
+
+    def _on_fan_table_changed(self, _item) -> None:
+        """表格只允许改角度和条数；高度是派生值，改回去。"""
+        self._fill_fan_heights()
+        self.recompute()
+
     def _on_layout_changed(self, _value=None) -> None:
         """中心高度或间距变了：按 y1=y2-d12 / y3=y2+d23 重建三行。
 
@@ -279,8 +291,8 @@ class ThinLensPage(QWidget):
             self.recompute()
 
     # ------------------------------------------------------------------
-    def _fan_specs(self) -> list[tuple[str, float, float]]:
-        """从表格读 (label, height, centre_deg)。"""
+    def _fan_specs(self) -> list[tuple[str, float, float, int]]:
+        """从表格读 (label, height, centre_deg, count)。"""
         specs = []
         for row in range(self.fan_table.rowCount()):
             def cell(column: int) -> str:
@@ -291,26 +303,52 @@ class ThinLensPage(QWidget):
             try:
                 height = float(cell(1) or 0.0)
                 centre = float(cell(2) or 0.0)
-            except ValueError as exc:
+                count = int(float(cell(3) or DEFAULT_RAY_COUNT))
+            except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"Point row {row + 1}: height/angle is not a number "
-                    f"({exc}).") from exc
-            specs.append((label, height, centre))
+                    f"Point row {row + 1}: height/angle/rays is not a "
+                    f"number ({exc}).") from exc
+            specs.append((label, height, centre, count))
         return specs
 
     def _fill_fans(self) -> None:
-        """按中心高度和两个间距重建三行物点。"""
+        """按中心高度和两个间距重建三行物点。
+
+        高度列是**派生值**，只读；用户通过 Centre y / d12 / d23 控制它。
+        角度和条数保留用户已填的内容。
+        """
         heights = thin.object_heights(self.centre_y.value(),
                                       self.d12.value(),
                                       self.d23.value())
         self.fan_table.blockSignals(True)
         for row, height in enumerate(heights):
-            self.fan_table.setItem(row, 0, QTableWidgetItem(f"P{row + 1}"))
-            self.fan_table.setItem(row, 1, QTableWidgetItem(f"{height:.3f}"))
-            item = self.fan_table.item(row, 2)
-            if item is None:
+            label = QTableWidgetItem(f"P{row + 1}")
+            label.setFlags(label.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.fan_table.setItem(row, 0, label)
+
+            height_item = QTableWidgetItem(f"{height:.3f}")
+            height_item.setFlags(
+                height_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.fan_table.setItem(row, 1, height_item)
+
+            if self.fan_table.item(row, 2) is None:
                 self.fan_table.setItem(
                     row, 2, QTableWidgetItem(f"{DEFAULT_CENTRE_DEG:g}"))
+            if self.fan_table.item(row, 3) is None:
+                self.fan_table.setItem(
+                    row, 3, QTableWidgetItem(str(DEFAULT_RAY_COUNT)))
+        self.fan_table.blockSignals(False)
+
+    def _fill_fan_heights(self) -> None:
+        """只刷新高度列；角度/条数由用户控制。"""
+        heights = thin.object_heights(self.centre_y.value(),
+                                      self.d12.value(),
+                                      self.d23.value())
+        self.fan_table.blockSignals(True)
+        for row, height in enumerate(heights):
+            item = QTableWidgetItem(f"{height:.3f}")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.fan_table.setItem(row, 1, item)
         self.fan_table.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -360,7 +398,6 @@ class ThinLensPage(QWidget):
             return
 
         fans = []
-        count = int(self.ray_count.currentText())
         try:
             specs = self._fan_specs()
         except ValueError as exc:
@@ -368,7 +405,7 @@ class ThinLensPage(QWidget):
             self.figure.clear()
             self.canvas.draw_idle()
             return
-        for index, (label, height, centre) in enumerate(specs):
+        for index, (label, height, centre, count) in enumerate(specs):
             fans.append(thin.ObjectFan(
                 height=height, centre_deg=centre, count=count,
                 label=label, colour=thin.FAN_COLOURS[index % 3]))

@@ -54,11 +54,29 @@ class TestFanAngles(unittest.TestCase):
         fan = thin.ObjectFan(0.0, 1.5, 3)
         self.assertEqual(fan.angles_deg(0.5), [1.0, 1.5, 2.0])
 
-    def test_counts_other_than_one_odd(self):
-        """偶数条不是 1/3/5，但仍然对称展开。"""
-        fan = thin.ObjectFan(0.0, 0.0, 4)
-        self.assertEqual(fan.angles_deg(1.0), [-0.5, 0.5, 1.5, 2.5]
-                         if False else fan.angles_deg(1.0))
+    def test_unsupported_counts_are_rejected(self):
+        """只支持 1/3/5；别的数量没有唯一的对称展开，应当报错。"""
+        for count in (0, 2, 4, 6):
+            with self.subTest(count=count):
+                fan = thin.ObjectFan(0.0, 0.0, count)
+                with self.assertRaises(ValueError):
+                    fan.angles_deg(0.5)
+
+    def test_non_finite_inputs_are_rejected(self):
+        system = thin.ThinSystem(
+            float("inf"), [thin.LensSpec("L", 100.0, 12.5)])
+        cases = [
+            ("infinite height", thin.ObjectFan(float("inf"), 0.0, 3), 0.5),
+            ("nan height", thin.ObjectFan(float("nan"), 0.0, 3), 0.5),
+            ("infinite angle", thin.ObjectFan(0.0, float("inf"), 3), 0.5),
+            ("nan angle", thin.ObjectFan(0.0, float("nan"), 3), 0.5),
+            ("infinite interval", thin.ObjectFan(0.0, 0.0, 3), float("inf")),
+            ("nan interval", thin.ObjectFan(0.0, 0.0, 3), float("nan")),
+        ]
+        for label, fan, interval in cases:
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    thin.sample_fans(system, [fan], interval)
 
 
 class TestDefaultFourF(unittest.TestCase):
@@ -170,7 +188,14 @@ class TestVignettingPerGroup(unittest.TestCase):
         self.assertIsNone(far["rms"])
 
     def test_blocked_rays_keep_stop_position(self):
-        """被挡光线的 path 终点等于停止坐标。"""
+        """被挡光线的 path 终点 = 第一片处的解析高度。
+
+        物点 y=40、中心角 8°，物距 100：
+            y_at_L1 = 40 + 100 * radians(8) = 53.957...
+        近轴模型用 θ 本身，不是 tan θ。
+        """
+        import math
+
         system = thin.ThinSystem(
             100.0,
             [thin.LensSpec("L1", 100.0, 2.0, distance_to_next=200.0),
@@ -178,10 +203,15 @@ class TestVignettingPerGroup(unittest.TestCase):
         )
         result = thin.sample_fans(
             system, [thin.ObjectFan(40.0, 8.0, 3, "far")], 0.5)
-        for ray in result["groups"][0]["rays"]:
-            if ray["blocked_at"] is not None:
-                self.assertEqual(ray["path"][-1][1], ray["path"][-1][1])
-                self.assertAlmostEqual(ray["path"][-1][0], 100.0, places=9)
+        blocked = [r for r in result["groups"][0]["rays"]
+                   if r["blocked_at"] is not None]
+        self.assertGreater(len(blocked), 0, "这组应当全部被 L1 挡住")
+        for ray in blocked:
+            # 每条光线用自己的角度算解析高度，不能固定用中心角
+            expected_y = 40.0 + 100.0 * math.radians(ray["theta_deg"])
+            self.assertEqual(ray["blocked_at"], "L1")
+            self.assertAlmostEqual(ray["path"][-1][0], 100.0, places=9)
+            self.assertAlmostEqual(ray["path"][-1][1], expected_y, places=9)
 
 
 class TestNoFiniteImage(unittest.TestCase):
@@ -196,18 +226,39 @@ class TestNoFiniteImage(unittest.TestCase):
             self.assertIsNone(group["rms"])
 
     def test_infinite_object_uses_parallel_incidence(self):
-        """inf 模式：物点高度就是入口高度，各条光线是不同入射方向。"""
+        """inf 模式：一个物点 = 一个入射方向，扫描入口高度。
+
+        同一方向的平行光在理想焦面上汇聚到同一点，所以 RMS 是 0；
+        如果在一组里换方向，得到的"RMS"其实是视场间距。
+        """
         system = thin.ThinSystem(
             float("inf"), [thin.LensSpec("L", 100.0, 12.5)])
         result = thin.sample_fans(
             system, [thin.ObjectFan(0.0, 1.0, 3, "tilted")], 0.5)
         group = result["groups"][0]
-        self.assertEqual([r["entry"] for r in group["rays"]], [0.0, 0.0, 0.0])
-        self.assertEqual([r["theta_deg"] for r in group["rays"]],
-                          [0.5, 1.0, 1.5])
-        # 近轴模型用 θ 本身（sinθ ≈ tanθ ≈ θ），不是 tanθ
+        # 同一方向
+        self.assertEqual({r["theta_deg"] for r in group["rays"]}, {1.0})
+        # 入口高度铺开
+        entries = [r["entry"] for r in group["rays"]]
+        self.assertEqual(len(set(entries)), 3)
+        self.assertAlmostEqual(min(entries), -12.5, places=9)
+        self.assertAlmostEqual(max(entries), 12.5, places=9)
+        # 平行光汇聚到 f·θ（近轴用 θ 本身）
+        expected = 100.0 * math.radians(1.0)
         for ray in group["rays"]:
-            expected = 100.0 * math.radians(ray["theta_deg"])
+            self.assertAlmostEqual(ray["y_image"], expected, places=9)
+        self.assertLess(group["rms"], 1e-12)
+        self.assertTrue(group["sufficient"])
+
+    def test_infinite_object_field_is_set_by_centre_angle(self):
+        """换中心角就是换视场方向，焦面位置随之移动。"""
+        system = thin.ThinSystem(
+            float("inf"), [thin.LensSpec("L", 100.0, 12.5)])
+        result = thin.sample_fans(
+            system, [thin.ObjectFan(0.0, 2.0, 3, "tilted")], 0.5)
+        group = result["groups"][0]
+        expected = 100.0 * math.radians(2.0)
+        for ray in group["rays"]:
             self.assertAlmostEqual(ray["y_image"], expected, places=9)
 
 

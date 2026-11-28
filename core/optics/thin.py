@@ -76,6 +76,32 @@ class ObjectFan:
     label: str = ""
     colour: str = ""
 
+    #: 界面只提供这三种；别的数量在几何上没有唯一对称展开
+    ALLOWED_COUNTS = (1, 3, 5)
+
+    def validate(self, interval_deg: float) -> None:
+        """拒绝非有限值和不支持的数量。
+
+        这些值最后会变成绘图坐标；inf/nan 进到 set_xlim / set_ylim 会
+        直接抛异常，所以必须在进入模型之前拦住。
+        """
+        name = self.label or "fan"
+        if not np.isfinite(self.height):
+            raise ValueError(
+                f"{name}: object height must be finite, got {self.height!r}.")
+        if not np.isfinite(self.centre_deg):
+            raise ValueError(
+                f"{name}: centre angle must be finite, "
+                f"got {self.centre_deg!r}.")
+        if not np.isfinite(interval_deg):
+            raise ValueError(
+                f"Ray interval must be finite, got {interval_deg!r}.")
+        count = int(self.count)
+        if count not in self.ALLOWED_COUNTS:
+            raise ValueError(
+                f"{name}: rays per point must be one of "
+                f"{self.ALLOWED_COUNTS}, got {self.count!r}.")
+
     def angles_deg(self, interval_deg: float) -> list[float]:
         """按中心对称展开的角度列表（度）。
 
@@ -83,11 +109,8 @@ class ObjectFan:
         3 条： θc-Δθ, θc, θc+Δθ
         5 条： θc-2Δθ, θc-Δθ, θc, θc+Δθ, θc+2Δθ
         """
+        self.validate(interval_deg)
         count = int(self.count)
-        if count < 1:
-            raise ValueError(
-                f"{self.label or 'fan'}: count must be >= 1, "
-                f"got {self.count!r}.")
         if count == 1:
             return [float(self.centre_deg)]
         half = (count - 1) // 2
@@ -418,24 +441,49 @@ def sample_fans(system: ThinSystem, fans: list[ObjectFan],
     system.validate()
     if not fans:
         raise ValueError("At least one object fan is required.")
+    if not np.isfinite(interval_deg):
+        raise ValueError(
+            f"Ray interval must be finite, got {interval_deg!r}.")
     if image_gap is None:
         image_gap = image_distance(system)
     finite = np.isfinite(image_gap)
 
+    # inf 模式下"一个物点"对应一个固定入射方向，它发出的是整束平行光；
+    # 采样要沿**入口高度**铺开，而不是在同一入口高度上换方向 ——
+    # 后者等于把不同视场混成一个"物点"，算出来的 RMS 是视场间距。
+    if system.object_at_infinity:
+        try:
+            radius = entrance_radius(system)
+        except ValueError:
+            radius = 0.0
+
     groups = []
     for index, fan in enumerate(fans):
         colour = fan.colour or FAN_COLOURS[index % len(FAN_COLOURS)]
-        angles_deg = fan.angles_deg(interval_deg)
+
+        if system.object_at_infinity:
+            fan.validate(interval_deg)
+            count = int(fan.count)
+            if radius > 0.0:
+                heights = ([0.0] if count == 1
+                           else list(np.linspace(-radius, radius, count)))
+            else:
+                heights = [0.0] * count
+            launch = [(float(h), math.radians(float(fan.centre_deg)))
+                      for h in heights]
+            angles_deg = [float(fan.centre_deg)]
+        else:
+            angles_deg = fan.angles_deg(interval_deg)
+            launch = [(float(fan.height), math.radians(a))
+                      for a in angles_deg]
 
         rays = []
-        for angle_deg in angles_deg:
-            theta = math.radians(angle_deg)
-            result = trace(system, float(fan.height), theta,
-                           image_gap=image_gap)
+        for entry, theta in launch:
+            result = trace(system, entry, theta, image_gap=image_gap)
             rays.append({
-                "entry": float(fan.height),
+                "entry": entry,
                 "theta": theta,
-                "theta_deg": float(angle_deg),
+                "theta_deg": math.degrees(theta),
                 "path": result["path"],
                 "blocked_at": result["blocked_at"],
                 "y_image": result["y_image"],
@@ -445,17 +493,26 @@ def sample_fans(system: ThinSystem, fans: list[ObjectFan],
         values = [r["y_image"] for r in reached
                   if r["y_image"] is not None]
 
+        # 充分性看**独立采样**：间隔为 0 时 5 条光线是同一个方向的重复，
+        # 标准差仍然是 0，但那不是"光斑很小"，只是只有一个样本。
+        if system.object_at_infinity:
+            distinct = len({round(r["entry"], 9) for r in reached})
+        else:
+            distinct = len({round(r["theta"], 12) for r in reached})
+
         label = fan.label or f"object {index + 1}"
         common = {
             "fan": fan,
             "label": label,
             "colour": colour,
             "height": float(fan.height),
+            "centre_deg": float(fan.centre_deg),
             "angles_deg": angles_deg,
             "rays": rays,
             "n_requested": len(rays),
             "n_reached": len(reached),
             "n_blocked": len(rays) - len(reached),
+            "n_distinct": distinct,
         }
 
         if not finite:
@@ -464,7 +521,7 @@ def sample_fans(system: ThinSystem, fans: list[ObjectFan],
                            "rms": None, "pv": None})
             continue
 
-        sufficient = len(values) >= 2
+        sufficient = distinct >= 2 and len(values) >= 2
         array = np.asarray(values, dtype=float) if values else np.array([])
         groups.append({
             **common,
