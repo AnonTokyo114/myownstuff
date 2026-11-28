@@ -57,7 +57,7 @@ class TestSingleLensImaging(unittest.TestCase):
     def test_magnification_undefined_at_infinity(self):
         system = thin.ThinSystem(float("inf"), [thin.LensSpec("L", 100.0,
                                                               25.0)])
-        self.assertFalse(np.isfinite(thin.magnification(system)))
+        self.assertIsNone(thin.magnification(system))
 
 
 class TestFourF(unittest.TestCase):
@@ -155,12 +155,42 @@ class TestGeometricSpot(unittest.TestCase):
         blurred = thin.spot(system, n_rays=9, image_gap=gap + 0.5)
         self.assertGreater(blurred["rms"], focused["rms"])
 
-    def test_spot_uses_smallest_aperture(self):
+    def test_entrance_radius_is_the_first_lens(self):
+        """入口半径取第一片有口径的透镜，不是全场最小。"""
         system = thin.ThinSystem(
             float("inf"),
             [thin.LensSpec("big", 100.0, 25.0, distance_to_next=50.0),
              thin.LensSpec("small", 100.0, 8.0)])
-        self.assertAlmostEqual(thin.spot(system, n_rays=5)["radius"], 8.0)
+        self.assertAlmostEqual(thin.entrance_radius(system), 25.0)
+
+    def test_unlit_downstream_aperture_does_not_change_the_beam(self):
+        """L2 口径 8 mm 截不到轴上束（半径只有 5 mm），改它不应影响结果。
+
+        report 的独立值：image_gap = 50 mm 时 9 条均匀光线的 RMS
+        应为 1.61374306 mm。旧的 min() 规则会低估 20%。
+        """
+        system = thin.ThinSystem(
+            float("inf"),
+            [thin.LensSpec("L1", 100.0, 10.0, distance_to_next=50.0),
+             thin.LensSpec("L2", 100.0, 8.0)])
+        profile = thin.sample_rays(system, n_rays=9, image_gap=50.0)
+        self.assertAlmostEqual(profile["rms"], 1.61374306, places=6)
+
+        wider = thin.ThinSystem(
+            float("inf"),
+            [thin.LensSpec("L1", 100.0, 10.0, distance_to_next=50.0),
+             thin.LensSpec("L2", 100.0, 10.0)])
+        profile_wide = thin.sample_rays(wider, n_rays=9, image_gap=50.0)
+        self.assertAlmostEqual(profile_wide["rms"], profile["rms"], places=9)
+
+    def test_known_downstream_aperture_blocks(self):
+        """只有真正挡住光线的下游口径才改变到达数。"""
+        system = thin.ThinSystem(
+            float("inf"),
+            [thin.LensSpec("L1", 100.0, 10.0, distance_to_next=50.0),
+             thin.LensSpec("L2", 100.0, 2.0)])
+        profile = thin.sample_rays(system, n_rays=9, image_gap=50.0)
+        self.assertGreater(profile["n_blocked"], 0)
 
     def test_finite_object_spot_is_zero_at_focus(self):
         """有限物距时的光锥也要在焦面上聚成一点。"""
@@ -209,6 +239,47 @@ class TestGeometricSpot(unittest.TestCase):
         self.assertIsNone(edge["blocked_at"])
         over = thin.trace(system, 0.0, theta_max * 1.01)
         self.assertIsNotNone(over["blocked_at"])
+
+
+class TestCoordinatesAndNoImage(unittest.TestCase):
+    """坐标原点与"有没有像面"必须一致。
+
+    object_distance = inf 时把 inf 加进累加式会得到 inf/nan；
+    无焦时不该给出像面光斑或有限的像面标记。
+    """
+
+    def test_infinite_object_puts_first_lens_at_zero(self):
+        system = thin.ThinSystem(float("inf"),
+                                 [thin.LensSpec("L", 100.0, 12.5)])
+        self.assertEqual(system.first_lens_z(), 0.0)
+        self.assertEqual(system.lens_z(), [0.0])
+        self.assertAlmostEqual(thin.image_plane_z(system), 100.0, places=9)
+
+    def test_afocal_has_no_image_plane(self):
+        """s = f -> 像距 inf -> 没有有限像面。"""
+        system = thin.ThinSystem(100.0, [thin.LensSpec("L", 100.0, 12.5)])
+        self.assertFalse(np.isfinite(thin.image_distance(system)))
+        self.assertIsNone(thin.image_plane_z(system))
+        self.assertIsNone(thin.magnification(system))
+        profile = thin.sample_rays(system, n_rays=9)
+        self.assertFalse(profile["has_image"])
+        self.assertIsNone(profile["rms"])
+
+    def test_virtual_image_plane_is_negative(self):
+        system = thin.ThinSystem(50.0, [thin.LensSpec("L", 100.0, 12.5)])
+        self.assertAlmostEqual(thin.image_plane_z(system), -50.0, places=9)
+
+    def test_plot_rays_match_statistics(self):
+        """绘图用的光线就是被统计的那些。"""
+        system = thin.ThinSystem(
+            100.0,
+            [thin.LensSpec("L1", 100.0, 12.5, distance_to_next=200.0),
+             thin.LensSpec("L2", 100.0, 12.5, distance_to_next=100.0)])
+        profile = thin.sample_rays(system, n_rays=9)
+        ends = [r["path"][-1][1] for r in profile["rays"]
+                if r["blocked_at"] is None]
+        self.assertAlmostEqual(float(np.asarray(ends).std()),
+                               profile["rms"], places=12)
 
 
 class TestValidation(unittest.TestCase):

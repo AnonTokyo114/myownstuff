@@ -3,6 +3,9 @@
 只暴露薄透镜模型真正需要的四个量：到下一片的距离、焦距、通光口径。
 曲率和折射率不在这里 —— 那是 Surface Ray Tracer 的事。
 
+绘图和摘要用**同一组**采样光线（``thin.sample_rays`` 的 ``rays``），
+避免出现"摘要说光斑为零、图上却有 25 mm 宽的线束"这种自相矛盾。
+
 摘要里明确写 "ideal paraxial, no aberrations or diffraction"，
 因为这个模型的光斑在焦面上严格为零，容易被误读成"完美系统"。
 """
@@ -11,7 +14,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -58,7 +60,7 @@ class ThinLensPage(QWidget):
         note.setStyleSheet("color: #5b6470;")
         outer.addWidget(note)
 
-        # ---- 物距 ----
+        # ---- 参数行 ----
         params = QHBoxLayout()
         params.addWidget(QLabel("Object distance"))
         self.object_distance = QLineEdit("100")
@@ -83,7 +85,7 @@ class ThinLensPage(QWidget):
         params.addStretch(1)
         outer.addLayout(params)
 
-        # ---- 主体：左表格 右图 ----
+        # ---- 左表格 / 右图 ----
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left = QWidget()
@@ -187,7 +189,7 @@ class ThinLensPage(QWidget):
             lenses.append(thin.LensSpec(label, focal, aperture, distance))
 
         text = self.object_distance.text().strip().lower()
-        if text in ("inf", "infinity", "∞"):
+        if text in ("inf", "infinity", "∞", "+inf"):
             object_distance = float("inf")
         else:
             try:
@@ -200,82 +202,136 @@ class ThinLensPage(QWidget):
 
     # ------------------------------------------------------------------
     def recompute(self) -> None:
+        # 第一步：成像求解 —— 这一部分不依赖口径
         try:
             system = self._read_system()
             system.validate()
             gap = thin.image_distance(system)
             mag = thin.magnification(system)
             image_z = thin.image_plane_z(system)
-            profile = thin.spot(system, n_rays=int(self.n_rays.currentText()))
         except Exception as exc:                 # noqa: BLE001
             self.summary.setText(f"<b>Cannot compute:</b> {exc}")
             self.figure.clear()
             self.canvas.draw_idle()
             return
 
-        parts = [
-            f"image distance = {gap:.4f} mm" if math.isfinite(gap)
-            else "image distance = ∞ (afocal)",
-            f"image plane z = {image_z:.3f} mm",
-            f"magnification = {mag:.5f}" if math.isfinite(mag)
-            else "magnification = n/a (object at infinity)",
-            f"spot RMS = {profile['rms'] * 1000:.3f} µm "
-            f"(PV {profile['pv'] * 1000:.3f} µm, "
-            f"{profile['n_reached']}/{profile['n_requested']} rays)",
-            "<i>ideal paraxial model — no aberrations, no diffraction</i>",
-        ]
-        if not math.isfinite(gap):
-            parts.append("<b>afocal system:</b> output is collimated.")
-        elif gap < 0:
+        # 第二步：光斑 —— 没有口径或没有有限像面时跳过，但不影响上面的结果
+        profile = None
+        profile_error = None
+        try:
+            profile = thin.sample_rays(system,
+                                       n_rays=int(self.n_rays.currentText()))
+        except Exception as exc:                 # noqa: BLE001
+            profile_error = str(exc)
+
+        self._render_summary(system, gap, mag, image_z, profile,
+                             profile_error)
+        self._render(system, image_z, profile)
+
+    # ------------------------------------------------------------------
+    def _render_summary(self, system, gap, mag, image_z, profile,
+                        profile_error) -> None:
+        parts = []
+        if math.isfinite(gap):
+            parts.append(f"image distance = {gap:.4f} mm")
+        else:
+            parts.append("<b>no finite image</b> (afocal: output collimated)")
+
+        if image_z is not None:
+            parts.append(f"image plane z = {image_z:.3f} mm")
+
+        if mag is not None:
+            parts.append(f"magnification = {mag:.5f}")
+        elif system.object_at_infinity:
+            parts.append("magnification = n/a (object at infinity)")
+        else:
+            parts.append("magnification = n/a (no finite image)")
+
+        if profile is not None and profile["has_image"]:
+            parts.append(
+                f"spot RMS = {profile['rms'] * 1000:.3f} µm "
+                f"(PV {profile['pv'] * 1000:.3f} µm, "
+                f"{profile['n_reached']}/{profile['n_requested']} rays)")
+        elif profile_error is not None:
+            parts.append(f"<i>spot not available: {profile_error}</i>")
+
+        parts.append("<i>ideal paraxial model — no aberrations, "
+                     "no diffraction</i>")
+
+        if math.isfinite(gap) and gap < 0:
             parts.append("<b>virtual image</b> (negative distance).")
         self.summary.setText(" &nbsp;|&nbsp; ".join(parts))
 
-        self._render(system, gap, image_z, profile)
-
     # ------------------------------------------------------------------
-    def _render(self, system, gap, image_z, profile) -> None:
+    def _render(self, system, image_z, profile) -> None:
         self.figure.clear()
         ax = self.figure.add_subplot(111)
 
-        # 光轴
-        limit = max(10.0, profile["radius"] * 1.6)
-        z_min = -5.0
-        z_max = max(image_z, 0.0) + 10.0
-        if not math.isfinite(z_max):
-            z_max = 200.0
-        ax.plot([z_min, z_max], [0, 0], color="#999", linewidth=0.6)
+        positions = system.lens_z()
+        radii = [lens.aperture for lens in system.lenses]
+        default_half = max((r for r in radii if r is not None), default=10.0)
 
-        # 透镜：竖线 + 口径
-        z = float(system.object_distance) if math.isfinite(
-            system.object_distance) else 0.0
-        last = len(system.lenses) - 1
-        for index, lens in enumerate(system.lenses):
-            half = lens.aperture if lens.aperture is not None else limit
+        # 画图范围由**实际存在的**坐标决定：物面、每片透镜、像面、
+        # 所有光线路径。虚像时像面在负 z，不能被裁掉。
+        zs: list[float] = [0.0, *positions]
+        ys: list[float] = [0.0]
+        for lens, z in zip(system.lenses, positions):
+            half = lens.aperture if lens.aperture is not None else default_half
+            ys.extend([half, -half])
+        if image_z is not None:
+            zs.append(image_z)
+
+        if profile is not None:
+            for ray in profile["rays"]:
+                for z, y in ray["path"]:
+                    zs.append(z)
+                    ys.append(y)
+
+        z_min = min(zs)
+        z_max = max(zs)
+        span = z_max - z_min
+        pad = max(span * 0.06, 5.0)
+        y_abs = max(abs(min(ys)), abs(max(ys)), default_half) * 1.15
+
+        ax.plot([z_min - pad, z_max + pad], [0, 0], color="#999",
+                linewidth=0.6)
+
+        # 透镜
+        for lens, z in zip(system.lenses, positions):
+            half = lens.aperture if lens.aperture is not None else default_half
             ax.plot([z, z], [-half, half], color="#2f6fb0", linewidth=3.0,
                     solid_capstyle="butt", alpha=0.85)
             ax.text(z, half * 1.06, lens.label, ha="center", va="bottom",
                     fontsize=8, color="#2f6fb0")
-            if index < last:
-                z += lens.distance_to_next
 
-        # 光线
-        heights = ([0.0] if profile["n_requested"] == 1 else
-                   list(np.linspace(-profile["radius"], profile["radius"],
-                                    profile["n_requested"])))
-        for h in heights:
-            path = thin.trace(system, h, 0.0, image_gap=gap)["path"]
-            ax.plot([p[0] for p in path], [p[1] for p in path],
-                    color="#c0392b", linewidth=0.8, alpha=0.7)
-
-        # 像面
-        if math.isfinite(image_z):
+        # 物面 / 像面
+        if not system.object_at_infinity:
+            ax.axvline(0.0, color="#8a6d3b", linestyle=":", linewidth=1.0)
+            ax.text(0.0, y_abs * 0.92, "object", color="#8a6d3b",
+                    ha="center", va="top", fontsize=8)
+        if image_z is not None:
             ax.axvline(image_z, color="#1a7f37", linestyle="--",
                        linewidth=1.2)
-            ax.text(image_z, limit * 0.92, "image", color="#1a7f37",
+            ax.text(image_z, y_abs * 0.92, "image", color="#1a7f37",
                     ha="center", va="top", fontsize=9)
 
-        ax.set_xlim(z_min, z_max)
-        ax.set_ylim(-limit * 1.15, limit * 1.15)
+        # 光线：和摘要用同一组
+        if profile is not None:
+            for ray in profile["rays"]:
+                path = ray["path"]
+                if len(path) < 2:
+                    continue
+                blocked = ray["blocked_at"] is not None
+                ax.plot([p[0] for p in path], [p[1] for p in path],
+                        color="#c0392b" if not blocked else "#b3261e",
+                        linewidth=0.8, alpha=0.7,
+                        linestyle="-" if not blocked else ":")
+                if blocked:
+                    ax.plot([path[-1][0]], [path[-1][1]], marker="x",
+                            color="#b3261e", markersize=5)
+
+        ax.set_xlim(z_min - pad, z_max + pad)
+        ax.set_ylim(-y_abs, y_abs)
         ax.set_xlabel("z (mm)")
         ax.set_ylabel("y (mm)")
         ax.grid(True, alpha=0.25)

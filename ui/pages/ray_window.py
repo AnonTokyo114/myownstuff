@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow
 
 from ui.theme import apply_theme
@@ -24,6 +25,9 @@ class _ToolWindow(QMainWindow):
         self.resize(*size)
         self._page = page
         self.setCentralWidget(page)
+        # 关闭即销毁。默认 close() 只隐藏，hub 的列表会一直累积，
+        # 每次重开都新建一整套窗口和画布。
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         apply_theme(self)
 
     def closeEvent(self, event) -> None:      # noqa: N802 - Qt 命名

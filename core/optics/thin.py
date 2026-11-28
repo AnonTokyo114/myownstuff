@@ -6,18 +6,29 @@
                              薄透镜   [[1, 0], [-1/f, 1]]
     surf   (y, nθ)            球面折射 + 精确 Snell
 
-两者的差别不只是符号：
-  * thin 没有球差、没有彗差、没有色差 —— 它是**理想**元件
-  * thin 没有衍射 —— 光斑大小只由口径和离焦决定
-  * thin 的光瞳要指定光阑后才谈得上，不是"第一面半口径"
+thin 没有球差、彗差、色差，也没有衍射 —— 光斑只由口径和离焦决定。
+所以摘要里必须写明"理想近轴模型，忽略像差与衍射"。
 
-所以摘要里必须写明"理想近轴模型，忽略像差与衍射"，否则容易误读。
+单位：距离 mm，焦距 mm，角度弧度（内部），外部接口用度。
 
-单位约定：距离 mm，焦距 mm，角度弧度（内部），外部接口用度。
+坐标原点
+--------
+有限物距时 z = 0 是物面，第一片透镜在 z = object_distance。
+物在无穷远时 ``object_distance`` 为 ``inf``，没有物面位置，
+这时把**第一片透镜**放在 z = 0。
+
+把 inf 加进累加式会得到 inf 或 nan，没有意义，所以这两种情形分开处理。
+
+有没有像面
+----------
+``image_distance`` 返回 ``inf`` 表示无焦（出射平行光）—— 没有有限像面。
+此时 ``image_plane_z`` 返回 ``None``，``trace`` 的 ``y_image`` 为 ``None``，
+``sample_rays`` 不产生光斑统计。不要给一个看起来正常的光斑数值。
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -44,28 +55,58 @@ class LensSpec:
 class ThinSystem:
     """物面 → 若干薄透镜 → 像面。
 
-    ``object_distance`` 是物面到第一片透镜的距离。物在无穷远时给一个
-    很大的值（例如 1e9）而不是 inf，避免矩阵里出现 inf * 0。
+    ``object_distance`` 是物面到第一片透镜的距离；物在无穷远时给 ``inf``。
     """
 
     object_distance: float
     lenses: list[LensSpec] = field(default_factory=list)
 
+    # -- 校验 ----------------------------------------------------------
     def validate(self) -> None:
         if not self.lenses:
             raise ValueError("至少需要一片透镜。")
-        if np.isnan(self.object_distance) or self.object_distance <= 0:
+        if math.isnan(self.object_distance) or self.object_distance <= 0:
             raise ValueError(
                 f"object_distance 必须为正，得到 {self.object_distance!r}。"
                 f"物在无穷远时可以直接给 inf。")
-        for lens in self.lenses:
+
+        last = len(self.lenses) - 1
+        for index, lens in enumerate(self.lenses):
             if not np.isfinite(lens.focal) or lens.focal == 0.0:
                 raise ValueError(
                     f"{lens.label}: focal 必须是有限的非零值，"
                     f"得到 {lens.focal!r}。")
-            if lens.aperture is not None and lens.aperture <= 0:
-                raise ValueError(
-                    f"{lens.label}: aperture 必须为正，得到 {lens.aperture!r}。")
+            if lens.aperture is not None:
+                if not np.isfinite(lens.aperture) or lens.aperture <= 0:
+                    raise ValueError(
+                        f"{lens.label}: aperture 必须是有限正数或 None，"
+                        f"得到 {lens.aperture!r}。")
+            if index < last:
+                gap = lens.distance_to_next
+                if not np.isfinite(gap) or gap <= 0:
+                    raise ValueError(
+                        f"{lens.label}: 到下一片的距离必须是有限正数，"
+                        f"得到 {gap!r}。")
+
+    # -- 坐标 ----------------------------------------------------------
+    @property
+    def object_at_infinity(self) -> bool:
+        return not np.isfinite(self.object_distance)
+
+    def first_lens_z(self) -> float:
+        """第一片透镜的 z。有限物距时物面在 0，无穷远时第一片在 0。"""
+        return 0.0 if self.object_at_infinity else float(self.object_distance)
+
+    def lens_z(self) -> list[float]:
+        """所有透镜的 z。"""
+        positions = []
+        z = self.first_lens_z()
+        last = len(self.lenses) - 1
+        for index, lens in enumerate(self.lenses):
+            positions.append(z)
+            if index < last:
+                z += lens.distance_to_next
+        return positions
 
 
 # ----------------------------------------------------------------------
@@ -82,15 +123,12 @@ def _lens(focal: float) -> np.ndarray:
 def system_matrix(system: ThinSystem) -> np.ndarray:
     """物面到**最后一片透镜**的矩阵（不含到像面的那段）。
 
-    物在无穷远时跳过物面到第一片透镜的传播段 —— 那时输入的 ``y, θ``
-    就是光线在第一个透镜处的状态，``P(inf)`` 在数值上没有意义
-    （它会把 y 放大到 1e9 量级，再被透镜除回来，全是舍入误差）。
+    物在无穷远时跳过物面到第一片的传播段 —— 那时输入的 ``y, θ``
+    就是光线在第一个透镜处的状态，``P(inf)`` 在数值上没有意义。
     """
     system.validate()
-    if np.isfinite(system.object_distance):
-        M = _propagate(system.object_distance)
-    else:
-        M = np.eye(2)
+    M = np.eye(2) if system.object_at_infinity \
+        else _propagate(system.object_distance)
     last = len(system.lenses) - 1
     for index, lens in enumerate(system.lenses):
         M = _lens(lens.focal) @ M
@@ -100,79 +138,80 @@ def system_matrix(system: ThinSystem) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------
-# 像距
+# 像距 / 放大率 / 像面
 # ----------------------------------------------------------------------
 def image_distance(system: ThinSystem) -> float:
-    """满足成像条件的像距。
+    """满足成像条件的像距；``inf`` 表示无焦，负值表示虚像。
 
-    返回 ``inf`` 表示无焦系统（出射平行光），负值表示虚像。
+    成像条件取决于物的位置：
 
-    成像条件取决于物的位置，两者不同：
-
-      * 有限物距 ``y_out = A·y_in + B·u_in``，要像与入射角度无关 -> ``B = 0``
-      * 物在无穷远 ``u_in = 0``，要所有平行光汇聚成一点 -> ``A = 0``
-        （此时 ``y_out = (A + g·C)·y_in``，与 y_in 无关才成点像）
-
-    用 ``P(g) @ M`` 展开：
-      有限物  ``B(g) = B0 + g·D0 = 0``
-      无穷远  ``A(g) = A0 + g·C0 = 0``
+      * 有限物 ``y_out = A·y_in + B·u_in``，要与入射角无关 -> ``B = 0``
+      * 无穷远 ``u_in = 0``，要所有平行光汇聚一点 -> ``A = 0``
     """
     M = system_matrix(system)
-    if np.isfinite(system.object_distance):
-        b0, d0 = float(M[0, 1]), float(M[1, 1])
-        if abs(d0) < EPS:
+    if system.object_at_infinity:
+        a0, c0 = float(M[0, 0]), float(M[1, 0])
+        if abs(c0) < EPS:
             return float("inf")
-        return -b0 / d0
-    a0, c0 = float(M[0, 0]), float(M[1, 0])
-    if abs(c0) < EPS:
+        return -a0 / c0
+    b0, d0 = float(M[0, 1]), float(M[1, 1])
+    if abs(d0) < EPS:
         return float("inf")
-    return -a0 / c0
+    return -b0 / d0
 
 
-def magnification(system: ThinSystem) -> float:
-    """横向放大率（在最佳像面上）。
+def has_finite_image(system: ThinSystem) -> bool:
+    return np.isfinite(image_distance(system))
 
-    物在无穷远时横向放大率无定义（物高不存在），返回 ``inf``。
-    """
-    if not np.isfinite(system.object_distance):
-        return float("inf")
-    M = system_matrix(system)
+
+def magnification(system: ThinSystem) -> float | None:
+    """横向放大率；物在无穷远或无有限像面时返回 ``None``。"""
+    if system.object_at_infinity:
+        return None
     gap = image_distance(system)
     if not np.isfinite(gap):
-        return float("inf")
+        return None
+    M = system_matrix(system)
     return float(M[0, 0] + gap * M[1, 0])
+
+
+def image_plane_z(system: ThinSystem) -> float | None:
+    """像面的绝对 z；没有有限像面时返回 ``None``。"""
+    gap = image_distance(system)
+    if not np.isfinite(gap):
+        return None
+    return system.lens_z()[-1] + gap
 
 
 # ----------------------------------------------------------------------
 # 追迹
 # ----------------------------------------------------------------------
-def trace(system: ThinSystem, y0: float, theta: float,
+def trace(system: ThinSystem, entry: float, theta: float,
           image_gap: float | None = None) -> dict:
     """追迹一条光线。
 
-    ``theta`` 是弧度。``image_gap`` 为 None 时用 :func:`image_distance`
-    求出的最佳像距。
+    entry 是**物面高度**（有限物距）或**第一片透镜处的高度**（无穷远）。
+    theta 是入射角（弧度）。
 
-    返回的 ``path`` 是 ``[(z, y), ...]``，包含物面、每片透镜和像面。
-    ``blocked_at`` 非 None 表示光线在某片透镜处超过口径。
+    ``image_gap`` 为 None 时用 :func:`image_distance`；像距为 inf 时
+    不会再有到像面的那一段，``y_image`` 返回 ``None``。
     """
     system.validate()
     if image_gap is None:
         image_gap = image_distance(system)
 
-    y = float(y0)
+    y = float(entry)
     u = float(theta)
-    z = 0.0
-    path = [(z, y)]
+    path: list[tuple[float, float]] = [(0.0, y)]
 
-    if np.isfinite(system.object_distance):
-        z += system.object_distance
+    if not system.object_at_infinity:
         y += system.object_distance * u
-        path.append((z, y))
-    # 物在无穷远：(y0, theta) 已经是第一片透镜处的状态
+        path.append((system.object_distance, y))
 
+    positions = system.lens_z()
     last = len(system.lenses) - 1
     for index, lens in enumerate(system.lenses):
+        z = positions[index]
         if lens.aperture is not None and abs(y) > lens.aperture + EPS:
             return {
                 "blocked_at": lens.label,
@@ -183,57 +222,52 @@ def trace(system: ThinSystem, y0: float, theta: float,
                 "angle_image": None,
             }
         u -= y / lens.focal
-        # 最后一片之后是到像面的距离，由 image_gap 决定；
-        # 这里再走 distance_to_next 就会把同一段距离算两次。
         if index < last:
-            z += lens.distance_to_next
             y += lens.distance_to_next * u
-            path.append((z, y))
 
-    # 最后一片透镜之后还能有一段到像面
+    y_image = None
     if np.isfinite(image_gap):
-        z += image_gap
         y += image_gap * u
-        path.append((z, y))
+        path.append((positions[-1] + image_gap, y))
+        y_image = y
+    else:
+        path.append((positions[-1], y))
 
     return {
         "blocked_at": None,
-        "z": z,
-        "y": y,
+        "z": path[-1][0],
+        "y": path[-1][1],
         "path": path,
-        "y_image": y,
+        "y_image": y_image,
         "angle_image": u,
     }
 
 
-def image_plane_z(system: ThinSystem) -> float:
-    """像面的绝对 z（相对物面）。"""
-    gap = image_distance(system)
-    z = float(system.object_distance)
-    last = len(system.lenses) - 1
-    for index, lens in enumerate(system.lenses):
-        if index < last:
-            z += lens.distance_to_next
-    if np.isfinite(gap):
-        z += gap
-    return z
-
-
 # ----------------------------------------------------------------------
-# 光斑（几何，无衍射）
+# 采样
 # ----------------------------------------------------------------------
-def spot(system: ThinSystem, n_rays: int = 9,
-         image_gap: float | None = None) -> dict:
-    """轴上物点的光斑：按可见口径采样。
+def entrance_radius(system: ThinSystem) -> float:
+    """入口采样半径：**第一片有口径的透镜**的半口径。
 
-    采样方式取决于物在哪：
+    不能用全场最小口径 —— 下游透镜的束半径可能远小于它的口径，
+    那样它根本不截断光线，先缩小入口等于改变了入射光束。
+    遮挡由 :func:`sample_rays` 逐片检查。
+    """
+    for lens in system.lenses:
+        if lens.aperture is not None:
+            return float(lens.aperture)
+    raise ValueError("所有透镜都没有给 aperture，无法定义入口采样范围。")
 
-      * 物在无穷远 —— 入射是平行光，扫**入射高度** y0（L1 处的半口径内）
-      * 有限物距   —— 轴上物点发出一条光锥，扫**角度** θ，
-        幅值由第一片透镜的口径决定：|y_at_L1| = s·|θ| ≤ aperture
 
-    两者的光斑都只反映离焦和口径截断；这个模型没有像差也没有衍射，
-    所以落在焦面上时严格为零。
+def sample_rays(system: ThinSystem, n_rays: int = 9,
+                image_gap: float | None = None) -> dict:
+    """生成采样光线并统计光斑。
+
+    这是**唯一**的采样来源：绘图和摘要都从这里取，保证画出来的就是
+    被统计的那些线。
+
+    物在无穷远：扫入口高度（平行入射）。
+    有限物距：同一个轴上物点，扫角度，幅值为第一片口径 / 物距。
     """
     system.validate()
     if int(n_rays) < 1:
@@ -241,49 +275,65 @@ def spot(system: ThinSystem, n_rays: int = 9,
     if image_gap is None:
         image_gap = image_distance(system)
 
-    usable = [lens.aperture for lens in system.lenses
-              if lens.aperture is not None]
-    if not usable:
-        raise ValueError(
-            "所有透镜都没有给 aperture，无法定义光斑采样范围。")
-    radius = min(usable)
-    first_aperture = next(
-        (lens.aperture for lens in system.lenses
-         if lens.aperture is not None), radius)
+    radius = entrance_radius(system)
 
-    hits, blocked = [], 0
-
-    def record(result) -> None:
-        nonlocal blocked
-        if result["blocked_at"] is not None:
-            blocked += 1
-            return
-        hits.append(result["y_image"])
-
-    if np.isfinite(system.object_distance):
-        # 轴上物点的光锥：角度上限由第一片口径定
-        theta_max = first_aperture / float(system.object_distance)
+    if system.object_at_infinity:
+        entries = ([0.0] if n_rays == 1
+                   else list(np.linspace(-radius, radius, int(n_rays))))
+        launch = [(float(h), 0.0) for h in entries]
+    else:
+        theta_max = radius / float(system.object_distance)
         angles = ([0.0] if n_rays == 1
                   else list(np.linspace(-theta_max, theta_max,
                                         int(n_rays))))
-        for theta in angles:
-            record(trace(system, 0.0, theta, image_gap=image_gap))
-    else:
-        heights = ([0.0] if n_rays == 1
-                   else list(np.linspace(-radius, radius, int(n_rays))))
-        for h in heights:
-            record(trace(system, h, 0.0, image_gap=image_gap))
+        launch = [(0.0, float(t)) for t in angles]
 
-    if not hits:
+    rays = []
+    for entry, theta in launch:
+        result = trace(system, entry, theta, image_gap=image_gap)
+        rays.append({
+            "entry": entry,
+            "theta": theta,
+            "path": result["path"],
+            "blocked_at": result["blocked_at"],
+            "y_image": result["y_image"],
+        })
+
+    finite = np.isfinite(image_gap)
+    reached = [r for r in rays if r["blocked_at"] is None]
+
+    if not finite:
+        return {
+            "radius": radius,
+            "n_requested": int(n_rays),
+            "n_reached": len(reached),
+            "n_blocked": len(rays) - len(reached),
+            "rays": rays,
+            "image_gap": float("inf"),
+            "has_image": False,
+            "centroid": None,
+            "rms": None,
+            "pv": None,
+        }
+
+    if not reached:
         raise ValueError("所有采样光线都被口径挡住。")
-    arr = np.asarray(hits, dtype=float)
+    values = np.asarray([r["y_image"] for r in reached], dtype=float)
     return {
         "radius": radius,
         "n_requested": int(n_rays),
-        "n_reached": len(hits),
-        "n_blocked": blocked,
-        "centroid": float(arr.mean()),
-        "rms": float(arr.std()),
-        "pv": float(arr.max() - arr.min()),
-        "image_gap": float(image_gap) if np.isfinite(image_gap) else image_gap,
+        "n_reached": len(reached),
+        "n_blocked": len(rays) - len(reached),
+        "rays": rays,
+        "image_gap": float(image_gap),
+        "has_image": True,
+        "centroid": float(values.mean()),
+        "rms": float(values.std()),
+        "pv": float(values.max() - values.min()),
     }
+
+
+def spot(system: ThinSystem, n_rays: int = 9,
+         image_gap: float | None = None) -> dict:
+    """:func:`sample_rays` 的别名。"""
+    return sample_rays(system, n_rays=n_rays, image_gap=image_gap)
