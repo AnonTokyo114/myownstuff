@@ -183,9 +183,12 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QThreadPool
             drained = QThreadPool.globalInstance().waitForDone(2000)
             if not drained:
+                # waitForDone 超时不会取消或终止任务；它们会继续跑完，
+                # 只是窗口不再等它们。这里如实记录，不假装已经清理干净。
                 logging.getLogger("research").warning(
-                    "background tasks still running at close; they will be "
-                    "abandoned (no cancel is available)")
+                    "thread pool still busy after 2 s; running tasks may "
+                    "continue and their callbacks may arrive after close "
+                    "(waitForDone cannot cancel a running task)")
         except Exception as exc:                     # noqa: BLE001
             logging.getLogger("research").warning(
                 "could not drain the thread pool at close: %s", exc)

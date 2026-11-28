@@ -179,10 +179,14 @@ serial\baudrate=115200
 ## 跑测试
 
 ```
-.venv\Scripts\python.exe -m unittest discover -s tests
+.venv\Scripts\python.exe -X faulthandler -m unittest discover -s tests
 ```
 
-`tests/` 里是历次代码审查确认过的缺陷的回归用例（227 个），覆盖：
+`-X faulthandler` 让解释器一启动就捕获致命信号。默认的
+`python -m unittest discover -s tests` 把 `test_*.py` 当顶层模块导入，
+不会执行 `tests/__init__.py`，所以那里打开捕获的调用不会生效。
+
+`tests/` 里是历次代码审查确认过的缺陷的回归用例（394 个），覆盖：
 
 | 文件 | 覆盖 |
 |---|---|
