@@ -182,8 +182,11 @@ class ThinLensPage(QWidget):
         self.fan_table.setMinimumHeight(110)
         left_layout.addWidget(self.fan_table)
 
-        hint = QLabel("Height is derived from Centre y and the "
-                      "two spacings; edit those above.")
+        hint = QLabel(
+            "Height is derived from Centre y and the two spacings.\n"
+            "Finite object: the middle ray of each fan is parallel to the "
+            "X axis; the other two are offset by Ray interval.\n"
+            "Object at infinity: Centre angle sets the field direction.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #5b6470; font-size: 11px;")
         left_layout.addWidget(hint)
@@ -215,7 +218,8 @@ class ThinLensPage(QWidget):
 
         # ---- 信号 ----
         self.compute_btn.clicked.connect(self.recompute)
-        self.object_distance.returnPressed.connect(self.recompute)
+        self.object_distance.returnPressed.connect(self._on_object_distance)
+        self.object_distance.editingFinished.connect(self._on_object_distance)
         self.interval.valueChanged.connect(lambda _v: self.recompute())
         self.centre_y.valueChanged.connect(self._on_layout_changed)
         self.d12.valueChanged.connect(self._on_d12)
@@ -227,6 +231,16 @@ class ThinLensPage(QWidget):
         self.load_defaults()
 
     # ------------------------------------------------------------------
+    def _on_object_distance(self) -> None:
+        """物距在有限/无穷远之间切换时，刷新表格的可编辑状态。"""
+        self._fill_fans()
+        self.recompute()
+
+    def _object_at_infinity(self) -> bool:
+        """按当前输入框判断物距是否无穷远。"""
+        return self.object_distance.text().strip().lower() in (
+            "inf", "infinity", "∞", "+inf")
+
     def _on_link_toggled(self, checked: bool) -> None:
         """勾选联动时把 d23 同步成 d12，再重建物点。
 
@@ -334,9 +348,19 @@ class ThinLensPage(QWidget):
                 height_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.fan_table.setItem(row, 1, height_item)
 
-            if self.fan_table.item(row, 2) is None:
-                self.fan_table.setItem(
-                    row, 2, QTableWidgetItem(f"{DEFAULT_CENTRE_DEG:g}"))
+            centre_item = self.fan_table.item(row, 2)
+            if centre_item is None:
+                centre_item = QTableWidgetItem(f"{DEFAULT_CENTRE_DEG:g}")
+                self.fan_table.setItem(row, 2, centre_item)
+            # 有限物距下中心光线固定平行 X 轴；只有 inf 模式才让
+            # 用户改视场方向。
+            flags = centre_item.flags()
+            if self._object_at_infinity():
+                flags |= Qt.ItemFlag.ItemIsEditable
+            else:
+                flags &= ~Qt.ItemFlag.ItemIsEditable
+                centre_item.setText(f"{DEFAULT_CENTRE_DEG:g}")
+            centre_item.setFlags(flags)
             if self.fan_table.cellWidget(row, 3) is None:
                 combo = QComboBox()
                 combo.addItems([str(c) for c in thin.ObjectFan.ALLOWED_COUNTS])
@@ -413,9 +437,14 @@ class ThinLensPage(QWidget):
             self.figure.clear()
             self.canvas.draw_idle()
             return
+        # 有限物距：中心光线固定平行 X 轴（θ = 0），只有间隔可调。
+        # 无穷远：centre 是视场方向，按表格里的值走。
+        at_infinity = system.object_at_infinity
         for index, (label, height, centre, count) in enumerate(specs):
             fans.append(thin.ObjectFan(
-                height=height, centre_deg=centre, count=count,
+                height=height,
+                centre_deg=centre if at_infinity else 0.0,
+                count=count,
                 label=label, colour=thin.FAN_COLOURS[index % 3]))
 
         profile = None
