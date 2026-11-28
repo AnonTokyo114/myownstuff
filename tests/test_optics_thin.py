@@ -169,6 +169,36 @@ class TestGeometricSpot(unittest.TestCase):
         self.assertLess(profile["rms"], 1e-12)
         self.assertAlmostEqual(thin.image_distance(system), 150.0, places=9)
 
+    def test_last_gap_is_not_counted_twice(self):
+        """最后一片的 distance_to_next 不能被重复使用。
+
+        页面默认就是这样配的（Lens2 的 distance_to_next = 100，
+        而 image_gap 也是 100）。重复计算会让 y 多走 100·u，
+        在完美聚焦的系统上报出毫米级光斑。
+        """
+        f = 100.0
+        system = thin.ThinSystem(
+            f,
+            [thin.LensSpec("L1", f, 12.5, distance_to_next=2 * f),
+             thin.LensSpec("L2", f, 12.5, distance_to_next=f)])
+        self.assertAlmostEqual(thin.image_distance(system), f, places=9)
+        profile = thin.spot(system, n_rays=9)
+        self.assertLess(profile["rms"], 1e-9,
+                        f"4f 光斑应为 0，实得 {profile['rms']*1000:.3f} um")
+
+    def test_traced_endpoint_matches_image_distance(self):
+        """追迹终点必须落在由 image_distance 算出的像面上。"""
+        f = 100.0
+        system = thin.ThinSystem(
+            f,
+            [thin.LensSpec("L1", f, 12.5, distance_to_next=2 * f),
+             thin.LensSpec("L2", f, 12.5, distance_to_next=f)])
+        expected_z = thin.image_plane_z(system)
+        for height in (0.0, 5.0, -5.0):
+            with self.subTest(height=height):
+                result = thin.trace(system, height, 0.0)
+                self.assertAlmostEqual(result["z"], expected_z, places=9)
+
     def test_finite_object_cone_is_limited_by_first_aperture(self):
         """光锥角度上限 = 第一片口径 / 物距。"""
         s, ap = 300.0, 12.5

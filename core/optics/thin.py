@@ -171,7 +171,8 @@ def trace(system: ThinSystem, y0: float, theta: float,
         path.append((z, y))
     # 物在无穷远：(y0, theta) 已经是第一片透镜处的状态
 
-    for lens in system.lenses:
+    last = len(system.lenses) - 1
+    for index, lens in enumerate(system.lenses):
         if lens.aperture is not None and abs(y) > lens.aperture + EPS:
             return {
                 "blocked_at": lens.label,
@@ -182,9 +183,12 @@ def trace(system: ThinSystem, y0: float, theta: float,
                 "angle_image": None,
             }
         u -= y / lens.focal
-        z += lens.distance_to_next
-        y += lens.distance_to_next * u
-        path.append((z, y))
+        # 最后一片之后是到像面的距离，由 image_gap 决定；
+        # 这里再走 distance_to_next 就会把同一段距离算两次。
+        if index < last:
+            z += lens.distance_to_next
+            y += lens.distance_to_next * u
+            path.append((z, y))
 
     # 最后一片透镜之后还能有一段到像面
     if np.isfinite(image_gap):
