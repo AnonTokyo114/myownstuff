@@ -55,9 +55,11 @@ class _Base(unittest.TestCase):
 
     def tearDown(self):
         # 测试之间不要留下在跑的后台任务：它们在解释器退出时
-        # 可能让进程以 139 结束。
+        # 可能让进程以 139 结束。wait_idle 同时等线程结束和主线程
+        # 回调处理完；它超时说明还有东西没清干净，那是测试问题，
+        # 不能静默忽略。
         from tests import wait_idle
-        wait_idle()
+        self.assertTrue(wait_idle(), "后台任务或回调在超时前没有清空")
 
     def pump(self, seconds=5.0, until=None):
         deadline = time.time() + seconds

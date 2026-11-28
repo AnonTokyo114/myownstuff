@@ -181,9 +181,14 @@ class MainWindow(QMainWindow):
         # 给一个有限等待：卡住的后台任务不应该阻止窗口关闭。
         try:
             from PySide6.QtCore import QThreadPool
-            QThreadPool.globalInstance().waitForDone(2000)
-        except Exception:                            # noqa: BLE001
-            pass
+            drained = QThreadPool.globalInstance().waitForDone(2000)
+            if not drained:
+                logging.getLogger("research").warning(
+                    "background tasks still running at close; they will be "
+                    "abandoned (no cancel is available)")
+        except Exception as exc:                     # noqa: BLE001
+            logging.getLogger("research").warning(
+                "could not drain the thread pool at close: %s", exc)
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ 样式
