@@ -40,7 +40,7 @@ PAGES = [
     ("home", "Home", "🏠", "ui.pages.home_page:HomePage"),
     ("calculus", "Calculus", "∫", "ui.pages.calculus_page:CalculusPage"),
     ("formula", "Formula Renderer", "∑", "ui.pages.formula_page:FormulaPage"),
-    ("ray", "Ray Tracer", "◇", "ui.pages.ray_page:RayPage"),
+    ("optics", "Optics", "◇", "ui.pages.optics_hub_page:OpticsHubPage"),
     ("matrix", "Matrix Calculator", "▦",
      "ui.pages.matrix_page:MatrixCalculatorPage"),
     ("plotter", "Plotter", "📈", "ui.pages.plotter_page:PlotterPage"),

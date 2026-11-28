@@ -102,9 +102,11 @@ class HomePage(QWidget):
              "and Taylor expansions — numeric and symbolic, with LaTeX output."),
             ("formula", "∑", "Formula Renderer",
              "Turn LaTeX source into a transparent PNG for slides and reports."),
-            ("ray", "◇", "Ray Tracer",
-             "Sequential meridional ray tracing with EFL/BFL, spot size, "
-             "best focus and spherical aberration."),
+            ("optics", "◇", "Optics",
+             "Three optical models in separate windows: ideal thin lens "
+             "(quick layout arithmetic), surface ray tracing (EFL/BFL, spot "
+             "size, best focus, spherical aberration), and Fourier optics "
+             "(planned)."),
             ("matrix", "▦", "Matrix Calculator",
              "Eigen-decomposition, matrix arithmetic, 1D eigenfunctions and "
              "parameter sweeps — numeric and symbolic."),

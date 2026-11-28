@@ -220,12 +220,16 @@ def image_plane_z(system: ThinSystem) -> float:
 # ----------------------------------------------------------------------
 def spot(system: ThinSystem, n_rays: int = 9,
          image_gap: float | None = None) -> dict:
-    """轴上光斑：按可见口径均匀采样若干条光线。
+    """轴上物点的光斑：按可见口径采样。
 
-    半径取**最小的**那片透镜口径 —— 那是实际的限制光阑（在理想薄透镜
-    模型里，口径限制就是光阑，不需要再求入瞳）。
+    采样方式取决于物在哪：
 
-    没有衍射，所以 RMS 只反映离焦和口径截断后的几何分布。
+      * 物在无穷远 —— 入射是平行光，扫**入射高度** y0（L1 处的半口径内）
+      * 有限物距   —— 轴上物点发出一条光锥，扫**角度** θ，
+        幅值由第一片透镜的口径决定：|y_at_L1| = s·|θ| ≤ aperture
+
+    两者的光斑都只反映离焦和口径截断；这个模型没有像差也没有衍射，
+    所以落在焦面上时严格为零。
     """
     system.validate()
     if int(n_rays) < 1:
@@ -239,16 +243,32 @@ def spot(system: ThinSystem, n_rays: int = 9,
         raise ValueError(
             "所有透镜都没有给 aperture，无法定义光斑采样范围。")
     radius = min(usable)
+    first_aperture = next(
+        (lens.aperture for lens in system.lenses
+         if lens.aperture is not None), radius)
 
-    heights = [0.0] if n_rays == 1 else list(
-        np.linspace(-radius, radius, int(n_rays)))
     hits, blocked = [], 0
-    for h in heights:
-        result = trace(system, h, 0.0, image_gap=image_gap)
+
+    def record(result) -> None:
+        nonlocal blocked
         if result["blocked_at"] is not None:
             blocked += 1
-            continue
+            return
         hits.append(result["y_image"])
+
+    if np.isfinite(system.object_distance):
+        # 轴上物点的光锥：角度上限由第一片口径定
+        theta_max = first_aperture / float(system.object_distance)
+        angles = ([0.0] if n_rays == 1
+                  else list(np.linspace(-theta_max, theta_max,
+                                        int(n_rays))))
+        for theta in angles:
+            record(trace(system, 0.0, theta, image_gap=image_gap))
+    else:
+        heights = ([0.0] if n_rays == 1
+                   else list(np.linspace(-radius, radius, int(n_rays))))
+        for h in heights:
+            record(trace(system, h, 0.0, image_gap=image_gap))
 
     if not hits:
         raise ValueError("所有采样光线都被口径挡住。")

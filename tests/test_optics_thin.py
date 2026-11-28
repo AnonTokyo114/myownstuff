@@ -162,6 +162,24 @@ class TestGeometricSpot(unittest.TestCase):
              thin.LensSpec("small", 100.0, 8.0)])
         self.assertAlmostEqual(thin.spot(system, n_rays=5)["radius"], 8.0)
 
+    def test_finite_object_spot_is_zero_at_focus(self):
+        """有限物距时的光锥也要在焦面上聚成一点。"""
+        system = thin.ThinSystem(300.0, [thin.LensSpec("L", 100.0, 12.5)])
+        profile = thin.spot(system, n_rays=9)
+        self.assertLess(profile["rms"], 1e-12)
+        self.assertAlmostEqual(thin.image_distance(system), 150.0, places=9)
+
+    def test_finite_object_cone_is_limited_by_first_aperture(self):
+        """光锥角度上限 = 第一片口径 / 物距。"""
+        s, ap = 300.0, 12.5
+        system = thin.ThinSystem(s, [thin.LensSpec("L", 100.0, ap)])
+        theta_max = ap / s
+        # 恰好在这个角度上应该刚好处在口径边缘（不判为挡住）
+        edge = thin.trace(system, 0.0, theta_max)
+        self.assertIsNone(edge["blocked_at"])
+        over = thin.trace(system, 0.0, theta_max * 1.01)
+        self.assertIsNotNone(over["blocked_at"])
+
 
 class TestValidation(unittest.TestCase):
     def test_rejects_bad_inputs(self):
