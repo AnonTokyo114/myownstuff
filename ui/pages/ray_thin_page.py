@@ -318,15 +318,27 @@ class ThinLensPage(QWidget):
                     ha="center", va="top", fontsize=9)
 
         # 光线：和摘要用同一组
+        virtual = image_z is not None and image_z < positions[-1] - 1e-9
         if profile is not None:
             for ray in profile["rays"]:
                 path = ray["path"]
                 blocked = ray["blocked_at"] is not None
                 if len(path) >= 2:
-                    ax.plot([p[0] for p in path], [p[1] for p in path],
-                            color="#c0392b" if not blocked else "#b3261e",
-                            linewidth=0.8, alpha=0.7,
-                            linestyle="-" if not blocked else ":")
+                    colour = "#c0392b" if not blocked else "#b3261e"
+                    if virtual and not blocked:
+                        # 最后一段是反向延长线：光线实际只走到末片，
+                        # 像点是延长线的交点，画虚线区分。
+                        ax.plot([p[0] for p in path[:-1]],
+                                [p[1] for p in path[:-1]],
+                                color=colour, linewidth=0.8, alpha=0.7)
+                        ax.plot([path[-2][0], path[-1][0]],
+                                [path[-2][1], path[-1][1]],
+                                color=colour, linewidth=0.8, alpha=0.5,
+                                linestyle="--")
+                    else:
+                        ax.plot([p[0] for p in path], [p[1] for p in path],
+                                color=colour, linewidth=0.8, alpha=0.7,
+                                linestyle="-" if not blocked else ":")
                 # 叉号和"有没有线段可画"是两件事：第一片就被挡的光线
                 # path 只有起点，仍然要标出它停在哪个口径上。
                 if blocked and path:

@@ -237,7 +237,10 @@ def trace(system: ThinSystem, entry: float, theta: float,
         y += image_gap * u
         path.append((positions[-1] + image_gap, y))
         y_image = y
-    else:
+    elif path[-1][0] != positions[-1]:
+        # 无焦：没有像面。末片顶点可能还没记录（单片时不会进
+        # index>0 分支），也可能已经记过（多片时循环里加了）。
+        # 用坐标判重，避免多出一个零长度段。
         path.append((positions[-1], y))
 
     return {

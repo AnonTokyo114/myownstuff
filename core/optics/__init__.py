@@ -560,8 +560,6 @@ def spot_analysis(surfaces, z, field_deg, n_pupil=9, image_gap=None):
         pupil_samples = [0.0]
     else:
         pupil_samples = [float(h) for h in np.linspace(-pmax, pmax, n_pupil)]
-    center_index = len(pupil_samples) // 2
-
     if n_pupil < 2:
         z_first = float(zz[1]) if len(zz) > 1 else 0.0
         slope = math.tan(math.radians(field_deg))
