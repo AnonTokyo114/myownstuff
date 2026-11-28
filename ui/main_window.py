@@ -175,6 +175,15 @@ class MainWindow(QMainWindow):
             except Exception as exc:                 # noqa: BLE001
                 logging.getLogger("research").warning(
                     "cleanup failed for page %r: %s", key, exc)
+
+        # 清理只是作废在途任务（_session += 1），后台线程可能还在跑。
+        # 如果这时解释器退出，线程池析构未完成的任务会让进程以 139 结束。
+        # 给一个有限等待：卡住的后台任务不应该阻止窗口关闭。
+        try:
+            from PySide6.QtCore import QThreadPool
+            QThreadPool.globalInstance().waitForDone(2000)
+        except Exception:                            # noqa: BLE001
+            pass
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ 样式

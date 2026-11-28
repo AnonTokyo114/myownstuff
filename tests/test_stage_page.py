@@ -53,6 +53,12 @@ class _Base(unittest.TestCase):
         page._busy = False
         return page
 
+    def tearDown(self):
+        # 测试之间不要留下在跑的后台任务：它们在解释器退出时
+        # 可能让进程以 139 结束。
+        from tests import wait_idle
+        wait_idle()
+
     def pump(self, seconds=5.0, until=None):
         deadline = time.time() + seconds
         while time.time() < deadline:
