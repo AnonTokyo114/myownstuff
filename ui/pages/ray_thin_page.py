@@ -149,15 +149,16 @@ class ThinLensPage(QWidget):
         left_layout.setSpacing(6)
 
         left_layout.addWidget(QLabel("Lenses"))
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Label", "To next (mm)", "Focal (mm)", "Aperture (mm)"])
+            ["Label", "To next (mm)", "Focal (mm)",
+             "Semi-dia (mm)", "Diameter (mm)"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.table.setFixedWidth(430)
+        self.table.setFixedWidth(540)
         self.table.setMinimumHeight(96)
         left_layout.addWidget(self.table)
 
@@ -174,7 +175,7 @@ class ThinLensPage(QWidget):
         left_layout.addWidget(QLabel("Object points"))
         self.fan_table = QTableWidget(3, 4)
         self.fan_table.setHorizontalHeaderLabels(
-            ["Point", "Height (mm)", "Centre angle (deg)", "Rays"])
+            ["Point", "Height (mm)", "Angle (deg)", "Rays"])
         self.fan_table.verticalHeader().setVisible(False)
         self.fan_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
@@ -213,7 +214,7 @@ class ThinLensPage(QWidget):
         right_layout.addWidget(self.canvas, 1)
 
         splitter.addWidget(right)
-        splitter.setSizes([430, 660])
+        splitter.setSizes([540, 620])
         outer.addWidget(splitter, 1)
 
         # ---- 信号 ----
@@ -225,6 +226,7 @@ class ThinLensPage(QWidget):
         self.d12.valueChanged.connect(self._on_d12)
         self.d23.valueChanged.connect(self._on_d23)
         self.link_spacing.toggled.connect(self._on_link_toggled)
+        self.table.itemChanged.connect(self._on_lens_cell_changed)
         self.fan_table.itemChanged.connect(self._on_fan_table_changed)
 
         apply_theme(self)
@@ -289,11 +291,53 @@ class ThinLensPage(QWidget):
         self.recompute()
 
     def _append(self, values) -> None:
+        """values 是 (label, to_next, focal, semi_aperture)。"""
         row = self.table.rowCount()
         self.table.insertRow(row)
+        self.table.blockSignals(True)
         for column, value in enumerate(values):
             text = value if isinstance(value, str) else f"{value:g}"
             self.table.setItem(row, column, QTableWidgetItem(text))
+        self._sync_diameter_from_aperture(row)
+        self.table.blockSignals(False)
+
+    def _sync_diameter_from_aperture(self, row: int) -> None:
+        """半口径 -> 直径。空表示不限，另一列也留空。"""
+        item = self.table.item(row, 3)
+        raw = item.text().strip() if item else ""
+        try:
+            value = float(raw) if raw else None
+        except ValueError:
+            value = None
+        text = "" if value is None else f"{value * 2:g}"
+        self.table.setItem(row, 4, QTableWidgetItem(text))
+
+    def _sync_aperture_from_diameter(self, row: int) -> None:
+        """直径 -> 半口径。"""
+        item = self.table.item(row, 4)
+        raw = item.text().strip() if item else ""
+        try:
+            value = float(raw) if raw else None
+        except ValueError:
+            value = None
+        text = "" if value is None else f"{value / 2:g}"
+        self.table.setItem(row, 3, QTableWidgetItem(text))
+
+    def _on_lens_cell_changed(self, item) -> None:
+        """只在半口径/直径两列之间同步，避免递归。"""
+        column = item.column()
+        if column not in (3, 4):
+            self.recompute()
+            return
+        self.table.blockSignals(True)
+        try:
+            if column == 3:
+                self._sync_diameter_from_aperture(item.row())
+            else:
+                self._sync_aperture_from_diameter(item.row())
+        finally:
+            self.table.blockSignals(False)
+        self.recompute()
 
     def add_row(self) -> None:
         self._append(("Lens", 100.0, 100.0, 12.5))
@@ -399,8 +443,14 @@ class ThinLensPage(QWidget):
                 raise ValueError(
                     f"Row {row + 1}: spacing/focal is not a number "
                     f"({exc}).") from exc
+            # 索引 3 是半口径；索引 4 是派生的直径，不参与模型
             aperture_text = cell(3)
-            aperture = float(aperture_text) if aperture_text else None
+            try:
+                aperture = float(aperture_text) if aperture_text else None
+            except ValueError as exc:
+                raise ValueError(
+                    f"Row {row + 1}: aperture is not a number "
+                    f"({exc}).") from exc
             lenses.append(thin.LensSpec(label, focal, aperture, distance))
 
         text = self.object_distance.text().strip().lower()
