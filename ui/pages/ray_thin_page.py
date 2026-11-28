@@ -303,11 +303,14 @@ class ThinLensPage(QWidget):
             try:
                 height = float(cell(1) or 0.0)
                 centre = float(cell(2) or 0.0)
-                count = int(float(cell(3) or DEFAULT_RAY_COUNT))
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(
-                    f"Point row {row + 1}: height/angle/rays is not a "
+                    f"Point row {row + 1}: height/angle is not a "
                     f"number ({exc}).") from exc
+            widget = self.fan_table.cellWidget(row, 3)
+            count = (int(widget.currentText())
+                     if isinstance(widget, QComboBox)
+                     else DEFAULT_RAY_COUNT)
             specs.append((label, height, centre, count))
         return specs
 
@@ -334,9 +337,14 @@ class ThinLensPage(QWidget):
             if self.fan_table.item(row, 2) is None:
                 self.fan_table.setItem(
                     row, 2, QTableWidgetItem(f"{DEFAULT_CENTRE_DEG:g}"))
-            if self.fan_table.item(row, 3) is None:
-                self.fan_table.setItem(
-                    row, 3, QTableWidgetItem(str(DEFAULT_RAY_COUNT)))
+            if self.fan_table.cellWidget(row, 3) is None:
+                combo = QComboBox()
+                combo.addItems([str(c) for c in thin.ObjectFan.ALLOWED_COUNTS])
+                combo.setCurrentText(str(DEFAULT_RAY_COUNT))
+                combo.setFixedWidth(60)
+                combo.currentIndexChanged.connect(
+                    lambda _i: self.recompute())
+                self.fan_table.setCellWidget(row, 3, combo)
         self.fan_table.blockSignals(False)
 
     def _fill_fan_heights(self) -> None:

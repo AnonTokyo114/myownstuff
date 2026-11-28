@@ -62,6 +62,17 @@ class TestFanAngles(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     fan.angles_deg(0.5)
 
+    def test_count_must_be_a_whole_supported_number(self):
+        """3.5 不能被静默截成 3；inf 不能被 int() 吃掉变成 OverflowError。"""
+        for raw in (1, 3, 5, 3.0, 5.0):
+            with self.subTest(accept=raw):
+                thin.ObjectFan(0.0, 0.0, raw).angles_deg(0.5)
+        for raw in (3.5, 1.9, 4, 0, 2, 6, float("inf"), float("nan"),
+                    "3", True, None):
+            with self.subTest(reject=raw):
+                with self.assertRaises(ValueError):
+                    thin.ObjectFan(0.0, 0.0, raw).angles_deg(0.5)
+
     def test_non_finite_inputs_are_rejected(self):
         system = thin.ThinSystem(
             float("inf"), [thin.LensSpec("L", 100.0, 12.5)])

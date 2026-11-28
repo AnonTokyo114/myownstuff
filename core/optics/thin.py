@@ -96,11 +96,21 @@ class ObjectFan:
         if not np.isfinite(interval_deg):
             raise ValueError(
                 f"Ray interval must be finite, got {interval_deg!r}.")
-        count = int(self.count)
+        # 先检查原始值，不能先 int() 再判断 —— 那会把 3.5 静默截成 3，
+        # 也让 inf 变成 OverflowError 而不是一个可读的错误。
+        raw = self.count
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"{name}: rays per point must be an integer, got {raw!r}.")
+        if not np.isfinite(raw) or float(raw) != int(raw):
+            raise ValueError(
+                f"{name}: rays per point must be a whole number, "
+                f"got {raw!r}.")
+        count = int(raw)
         if count not in self.ALLOWED_COUNTS:
             raise ValueError(
                 f"{name}: rays per point must be one of "
-                f"{self.ALLOWED_COUNTS}, got {self.count!r}.")
+                f"{self.ALLOWED_COUNTS}, got {raw!r}.")
 
     def angles_deg(self, interval_deg: float) -> list[float]:
         """按中心对称展开的角度列表（度）。
@@ -435,8 +445,15 @@ def sample_fans(system: ThinSystem, fans: list[ObjectFan],
       * ``n_reached < 2``    采样不足，不给 RMS（标准差没有意义）
       * 其余                 正常给质心、RMS、PV
 
-    物在无穷远时，``fan.height`` 是**入口高度**，各条光线是**不同入射
-    方向**的平行光；有限物距时它是物面高度，光线从该点出发。
+    两种模式的采样方式不同：
+
+      * 有限物距：一个物点 = 物面上一个高度，光线从该点出发，
+        方向按 ``centre_deg ± k·interval_deg`` 展开
+      * 物在无穷远：一个物点 = **一个固定入射方向**（``centre_deg``），
+        它发出的是整束平行光，沿**入口高度**均匀采样。
+        此时 ``fan.height`` 不参与采样 —— 无穷远物点在物面上没有位置。
+
+    把不同方向混进一组，算出来的"RMS"是视场间距，不是光斑。
     """
     system.validate()
     if not fans:
